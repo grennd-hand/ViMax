@@ -128,9 +128,10 @@ class Screenwriter:
         self,
         idea: str,
         user_requirement: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> str:
         messages = [
-            ("system", system_prompt_template_develop_story),
+            ("system", system_prompt or system_prompt_template_develop_story),
             ("human", human_prompt_template_develop_story.format(idea=idea, user_requirement=user_requirement)),
         ]
         response = await self.chat_model.ainvoke(messages)
@@ -143,6 +144,7 @@ class Screenwriter:
         self,
         story: str,
         user_requirement: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> List[str]:
 
 
@@ -156,7 +158,7 @@ class Screenwriter:
         format_instructions = parser.get_format_instructions()
 
         messages = [
-            ("system", system_prompt_template_write_script_based_on_story.format(format_instructions=format_instructions)),
+            ("system", (system_prompt or system_prompt_template_write_script_based_on_story).format(format_instructions=format_instructions)),
             ("human", human_prompt_template_write_script_based_on_story.format(story=story, user_requirement=user_requirement)),
         ]
         response = await self.chat_model.ainvoke(messages)

@@ -24,33 +24,36 @@ export type StoryboardReadiness = {
 export type RenderCheckpoint = 'frames' | 'clips' | 'finalVideo';
 
 const FIELD_LABELS: Record<string, string> = {
-  idx: 'Number',
-  is_last: 'Final shot',
-  cam_idx: 'Camera',
-  visual_desc: 'Visual description',
-  visual_description: 'Visual description',
-  audio_desc: 'Audio',
-  description: 'Description',
-  ff_desc: 'First frame',
-  lf_desc: 'Last frame',
-  motion_desc: 'Motion',
-  variation_type: 'Transition type',
-  variation_reason: 'Transition notes',
-  ff_vis_char_idxs: 'Characters in first frame',
-  lf_vis_char_idxs: 'Characters in last frame',
-  character_idx: 'Character',
-  character_id: 'Character',
-  shot_idx: 'Shot',
-  scene_idx: 'Scene',
-  camera_idx: 'Camera',
+  seq: '消息编号', sender: '发言人', content: '内容', reply_to: '回复消息', stage: '阶段', type: '消息类型', delay: '延时',
+  custom_camera_note: '自定义机位备注',
+  idx: '编号',
+  is_last: '最后一个镜头',
+  cam_idx: '机位',
+  visual_desc: '画面描述',
+  visual_description: '画面描述',
+  audio_desc: '声音',
+  description: '说明',
+  ff_desc: '首帧',
+  lf_desc: '尾帧',
+  motion_desc: '动作',
+  variation_type: '转场类型',
+  variation_reason: '转场说明',
+  ff_vis_char_idxs: '首帧人物',
+  lf_vis_char_idxs: '尾帧人物',
+  character_idx: '人物',
+  character_id: '人物',
+  shot_idx: '镜头',
+  scene_idx: '场景',
+  camera_idx: '机位',
 };
 
 const FILE_TITLES: Record<string, string> = {
-  'camera_tree.json': 'Camera plan',
-  'characters.json': 'Characters',
-  'script.json': 'Script',
-  'shot_description.json': 'Shot description',
-  'storyboard.json': 'Storyboard',
+  'messages.json': '群聊消息',
+  'camera_tree.json': '机位规划',
+  'characters.json': '人物',
+  'script.json': '剧本',
+  'shot_description.json': '镜头描述',
+  'storyboard.json': '分镜',
 };
 
 export function isJsonArtifact(artifact: Artifact): boolean {
@@ -105,7 +108,7 @@ export function friendlyArtifactTitle(artifact: Artifact): string {
   const sceneMatch = artifact.path.match(/(?:^|\/)scene_(\d+)(?:\/|$)/i);
   const shotMatch = artifact.path.match(/(?:^|\/)shots\/(\d+)(?:\/|$)/i);
   const context = [];
-  if (sceneMatch) context.push(`Scene ${Number(sceneMatch[1]) + 1}`);
+  if (sceneMatch) context.push(`场景 ${Number(sceneMatch[1]) + 1}`);
   if (shotMatch) context.push(`Shot ${Number(shotMatch[1]) + 1}`);
   return context.length ? `${context.join(' · ')} · ${baseTitle}` : baseTitle;
 }
@@ -123,12 +126,12 @@ export function structuredRecordTitle(value: JsonValue, index: number, artifact:
 }
 
 export function formatStructuredValue(value: JsonValue, key = ''): string {
-  if (value === null) return 'Not specified';
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (value === null) return '未填写';
+  if (typeof value === 'boolean') return value ? '是' : '否';
   if (typeof value === 'number') return isIndexKey(key) ? String(value + 1) : String(value);
-  if (typeof value === 'string') return value.trim() || 'Not specified';
+  if (typeof value === 'string') return value.trim() || '未填写';
   if (Array.isArray(value) && value.every(isJsonPrimitive)) {
-    if (value.length === 0) return 'None';
+    if (value.length === 0) return '无';
     return value.map((item) => typeof item === 'number' && isIndexListKey(key) ? item + 1 : formatStructuredValue(item)).join(', ');
   }
   return '';
@@ -208,9 +211,9 @@ export function isJsonPrimitive(value: JsonValue): value is string | number | bo
 
 function recordNoun(artifact: Artifact): string {
   const name = artifact.name.toLowerCase();
-  if (name === 'storyboard.json' || name === 'shot_description.json') return 'Shot';
-  if (name === 'characters.json') return 'Character';
-  if (name === 'script.json') return 'Scene';
+  if (name === 'storyboard.json' || name === 'shot_description.json') return '镜头';
+  if (name === 'characters.json') return '人物';
+  if (name === 'script.json') return '场景';
   return 'Item';
 }
 

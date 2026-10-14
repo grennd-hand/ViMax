@@ -140,6 +140,8 @@ function activityId(turnId: string, toolId: string | undefined, name: string) {
 }
 
 export function humanize(value: string) {
+  const labels: Record<string, string> = {created: "已创建", running: "生成中", completed: "已完成", failed: "失败", paused: "已暂停", narrative_planning: "故事规划", planning: "规划", sampling_assistant: "正在思考", executing_tools: "执行生成流程", finalizing_answer: "整理结果", render: "视频生成", rendering: "正在生成视频", done: "已完成", storyboards: "分镜", script: "剧本", characters: "人物", storyboard: "分镜", pending: "待完成", ready: "已就绪", missing: "缺少素材", inactive: "未启用", halted: "已停止", Workflow: "生成流程", vimax_narrative_planning: "故事与剧本规划", vimax_render_video: "生成视频", vimax_novel_planning: "小说改编"};
+  if (labels[value]) return labels[value];
   return value
     .replace(/[_-]+/g, ' ')
     .replace(/\b\w/g, (letter) => letter.toUpperCase())

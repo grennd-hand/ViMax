@@ -288,6 +288,7 @@ async function removeSessionLogRecords(repoRoot, sessionId) {
 
 function sanitizeSession(record) {
   return {
+    dialogueRunId: record.style === "dialogue" ? String(record.session_id).replace(/^dialogue-/, "") : undefined,
     sessionId: String(record.session_id ?? ''),
     projectName: String(record.project_name ?? ''),
     workingDir: String(record.working_dir ?? ''),

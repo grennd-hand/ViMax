@@ -1,4 +1,5 @@
 export type SessionSummary = {
+  dialogueRunId?: string;
   sessionId: string;
   projectName: string;
   workingDir: string;

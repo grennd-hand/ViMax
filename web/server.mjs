@@ -1,3 +1,4 @@
+import {proxyDialogue} from './dialogue-proxy.mjs';
 import {createReadStream, existsSync} from 'node:fs';
 import {readFile} from 'node:fs/promises';
 import {createServer} from 'node:http';
@@ -33,6 +34,8 @@ let vite = null;
 const server = createServer(async (request, response) => {
   const url = new URL(request.url || '/', `http://${request.headers.host || `${host}:${port}`}`);
   try {
+    if (url.pathname.startsWith('/dialogue-api/')) return proxyDialogue(request, response, url);
+    if (url.pathname === '/dialogue' || url.pathname.startsWith('/dialogue/')) { response.writeHead(302, {Location: '/?view=dialogue' + (url.searchParams.get('run') ? '&run=' + encodeURIComponent(url.searchParams.get('run')) : '')}); response.end(); return; }
     if (url.pathname === '/api/events' && request.method === 'GET') {
       return openEventStream(request, response);
     }
