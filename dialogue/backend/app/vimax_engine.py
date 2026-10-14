@@ -23,6 +23,7 @@ from .memory_cognition import prepare_memory_context
 from .dialogue_quality import explicit_refusal
 from .scene_memory import apply_review_actions, apply_review_decisions
 from .narrative_plan import planning_requirement, parse_plan
+from .opening import opening_requirement, opening_stage
 
 ROOT = Path(__file__).resolve().parents[3]
 PLAN_PROMPT = """你是擅长写真实多人群聊的编剧。母本坐席内容是业务事实和引导目标，人物不是客服或审核员。只写精简的可执行事件线，不写电影故事、旁白、抽象主题、人物小传或逐句台词。先列12到18个互不重复的具体交流事件，每个事件写消息区间、谁有实际新问题、当下变化和与下一事件的接续。把人物的动机、个人时间安排、相互接话和实际操作穿插起来；不按人头轮流复述流程。业务信息只能来自母本，不编造页面功能、故障或提交许可。规划一次完整行动在最后10%篇幅才完成，前面围绕不同真实内容推进，不能提前完成后用等待凑数。结尾短，真实目标必须完成。"""
@@ -60,7 +61,7 @@ def decode_scenes(scenes: list[str], run: dict) -> list[dict]:
             messages.append({"seq": seq, "sender": speaker, "content": text.strip(), "reply_to": reply_to,
                              "type": "文本", "delay": "1", "image_code": None, "image_mode": None,
                              "replace_date": None, "source_seq": None, "source_row": None,
-                             "source_rows": [], "reply_source_seq": None, "stage": "自然群聊",
+                             "source_rows": [], "reply_source_seq": None, "stage": opening_stage(seq, run['config'].get('opening_policy')),
                              "reaction": "refuse" if declined else "continue", "task_state": "declined" if declined else "active", "performed_steps": []})
     if len(messages) != run["config"]["target_messages"]:
         raise ValueError(f"需要{run['config']['target_messages']}条消息，实际生成{len(messages)}条")
@@ -75,7 +76,10 @@ def writing_contract(template: dict, run: dict) -> str:
     facts = [{"row": m["source_row"], "text": m["content"]} for m in source["messages"] if m["sender"] == "坐席"]
     context = {"goal": template["analysis"], "source_seat_evidence": facts,
                "protected_literals": source_literals(source),
-               "roles": run["config"]["persona_cards"], "language": language_context(run["config"].get("language")),
+               "cast": list(run['agent_sessions']),
+               "roles": run["config"]["persona_cards"] if run['config'].get('persona_strength', 0.85) > 0 else {},
+               "persona_strength": run['config'].get('persona_strength', 0.85),
+               "language": language_context(run["config"].get("language")),
                "past_experience_by_owner": {role:state.get("long_term_memory",[]) for role,state in run["agent_sessions"].items()},
                "additional_plot": run["config"].get("story_notes", "")}
     return (
@@ -95,6 +99,9 @@ def writing_contract(template: dict, run: dict) -> str:
         "主行动者每个动作只写一次，有真正的新情况才补充；其他愿意者可以一句合并说明，不能逐一排队汇报打开、点赞、截图、提交。"
         "保持人设、个人安排和已做动作一致，做过的不再重复做；质疑得到答案就继续或作决定。"
         "围绕不同的具体问题、动机和体验展开，人物会接话、打岔、犹豫、纠正自己，长短交错。"
+        "persona_strength越高，越让priority、decision_rule和reaction_cues影响人物选择、接话对象与发言频率；"
+        "低值只保留轻微口吻差异，零值不用人格卡；不管数值多少都不能改母本事实。"
+        "人物名单只用cast；roles是这些普通群友的行为卡，不能自称原型名人或带入原作身份。"
         "不要让所有人轮流汇报同一步骤，不要反复复述风险或已解决的问题，不要新增未经母本支持的活动。"
         f"最终目标恰好{target}条群聊消息，第一条和最后一条由坐席说，前面不能提前结束全群。"
         "不要把原始账号人数或逐人发言覆盖当成目标；目标完成和自然接话优先。"
@@ -102,7 +109,7 @@ def writing_contract(template: dict, run: dict) -> str:
         "文字消息不含图片素材，禁止用[已完成截图]之类假图片占位符；可以用文字说明已分享截图。"
         "不要让人物说‘不虚构结果’‘公开说明的动作’‘活动文本提到’等创作/审阅用语，直接像真人接话。"
         "参与者的私有判断只属于本人，其他人只能依据已公开的话回应。不要输出角色内心、制作解释或旁白。"
-        "\n" + json.dumps(context, ensure_ascii=False)
+        "\n" + opening_requirement(run) + "\n" + json.dumps(context, ensure_ascii=False)
     )
 
 
@@ -159,7 +166,7 @@ async def process(session_id, api):
                 api.save_run(run)
                 scenes = await writer.write_script_based_on_story(run["vimax_story"], contract +
                     "\n输出格式：script数组每个元素是一段群聊字符串，内容只能是编号台词行，"
-                    "例如001|坐席|0|大家晚上好。\n002|客户1|1|我想先问一下怎么参加？\n"
+                    "例如001|坐席|0|大家好呀。\n002|客户1|1|你好，刚忙完坐下来。\n"
                     "四个字段分别是三位连续编号、发言人、回复的已有消息编号（不回复则0）、消息文字。"
                     "编号从001连续到目标条数，段与段之间不能重置编号。不要表格、动作、空场景或未编号的引语。"
                     "单条坐席尽量80字内，参与者45字内，长链接必须保持完整，其他必要长度遵循单条上限。"
@@ -267,6 +274,12 @@ async def process(session_id, api):
 def contract_errors(source, run):
     # Account coverage is not the content objective; the cast is freely configured.
     errors=[error for error in validate_run(source, run) if not error.endswith("没有发言")]
+    policy = run.get('config', {}).get('opening_policy')
+    if policy:
+        literals = source_literals(source)
+        for message in run.get('messages', []):
+            if message['seq'] < policy['main_start'] and any(value in message['content'] for value in literals):
+                errors.append(f"消息 {message['seq']} 在寒暄或了解群用途阶段提前公布入口、联系人或固定代码，应移到正题阶段")
     if str(run.get('config',{}).get('language','zh-CN')).startswith('zh'):
         left=set()
         messages=run.get('messages',[])

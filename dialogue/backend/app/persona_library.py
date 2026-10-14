@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from .locale import language_context, normalize_language
 
 
@@ -86,15 +89,25 @@ def persona_library(language: str = "zh-CN") -> list[dict]:
                                      "可偶尔使用，不能直译中文口头禅，也不要每句重复。")
         entries.append({"id": source["id"], "name": source["name"],
                         "kind": source["kind"], "version": 1, "card": card})
+    for source in json.loads(Path(__file__).with_name('persona_catalog.json').read_text(encoding='utf-8')):
+        entry = {**source, 'card': dict(source['card'])}
+        if not chinese:
+            entry['card']['speech_habits'] = f'使用自然的{name}口语，保留行为与节奏，不直译中文口头禅。'
+        entries.append(entry)
     return entries
 
 
-def default_cards(roles: list[str], language: str = "zh-CN") -> dict[str, dict[str, str]]:
+def default_entries(roles: list[str], language: str = 'zh-CN') -> dict[str, dict]:
     entries = persona_library(language)
-    seat = next(item["card"] for item in entries if item["kind"] == "seat")
-    participants = [item["card"] for item in entries if item["kind"] == "participant"]
-    cards = {role: dict(participants[index % len(participants)])
+    seat = next(item for item in entries if item['id'] == 'seat_conversational')
+    participants = [item for item in entries if item.get('recommended')]
+    participants += [item for item in entries if item['kind'] == 'participant' and not item.get('recommended')]
+    selected = {role: participants[index % len(participants)]
              for index, role in enumerate(name for name in roles if name != "坐席")}
     if "坐席" in roles:
-        cards["坐席"] = dict(seat)
-    return cards
+        selected['坐席'] = seat
+    return selected
+
+
+def default_cards(roles: list[str], language: str = "zh-CN") -> dict[str, dict[str, str]]:
+    return {role: dict(entry['card']) for role, entry in default_entries(roles, language).items()}

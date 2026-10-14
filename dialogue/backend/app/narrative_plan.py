@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from pydantic import BaseModel, Field
+from .opening import opening_requirement
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('vimax_novel_event', ROOT / 'interfaces' / 'event.py')
@@ -27,7 +28,11 @@ class DialoguePlan(BaseModel):
 
 
 def planning_requirement(run: dict) -> str:
+    policy = run['config'].get('opening_policy')
+    boundaries = (f"寒暄暖场必须为独立事件并结束于第{policy['warm_end']}条，"
+                  f"了解群用途必须为独立事件并结束于第{policy['orientation_end']}条；后续事件才进入正题。" if policy else '')
     return (
+        '\n' + opening_requirement(run) + boundaries +
         '\n借用ViMax小说事件规划的完整因果链，将每个不同交流事件写成起因、过程、结果，并保留跨事件人物连续性。'
         '不同事件不能重演同一步骤，结果应改变公开信息或某个人的选择；解决的问题后续不再重新询问。'
         '只规划台词将要呈现的事件，不把计划当作已经发生，不编造外部结果或新业务规则。'
@@ -62,4 +67,9 @@ def parse_plan(text: str, run: dict) -> list[dict]:
         expected = event.message_end + 1
     if expected != run['config']['target_messages'] + 1:
         raise ValueError('事件规划未覆盖所需消息总数')
+    policy = run['config'].get('opening_policy')
+    if policy:
+        ends = {event.message_end for event in plan.events}
+        if not {policy['warm_end'], policy['orientation_end']} <= ends:
+            raise ValueError('事件规划需将寒暄暖场、了解群用途与正题分开，保持规定的开场区间')
     return [event.model_dump() for event in plan.events]

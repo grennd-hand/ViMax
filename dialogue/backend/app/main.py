@@ -24,7 +24,8 @@ from pydantic import BaseModel, Field, field_validator
 from .core import BRACKET_RE, META_RE, URL_RE, analyze, build_schedule, codes_in, contradicts_group_screenshot, export_xlsx, group_screenshot_required, min_total, protected_values, read_source, source_literals, unsupported_code_origin, unsupported_contact_acceptance_wait, unsupported_global_verification_halt, unsupported_page_detail, validate_run
 from .dialogue_quality import closes_group, style_findings
 from .locale import language_context, message_char_limit, normalize_language
-from .persona_library import default_cards, persona_library
+from .persona_library import default_cards, default_entries, persona_library
+from .opening import opening_policy, opening_requirement, opening_schedule
 from .persona_memory import record_public_memory
 from .memory_store import SQLiteMemoryStore, bind_characters, init_memory_schema, normalize_reflections, reflection_due, sync_accepted_memory
 from .memory_cognition import prepare_memory_context
@@ -534,49 +535,12 @@ async def suggest_personas(template_id: str, payload: PersonaRequest) -> dict:
     if not template["analysis"].get("confirmed"):
         raise HTTPException(409, "请先确认母本目标")
     roles = template["source"]["accounts"] + [f"客户{i + 1}" for i in range(payload.customer_count)]
-    cards = default_persona_cards(["坐席"] + roles, payload.language)
-    personas = {role: card["identity"] for role, card in cards.items()}
-    source = "fallback"
-    try:
-        result = await asyncio.wait_for(model_json(
-            "为本地群聊模拟设置彼此不同的人格。坐席负责引导和答疑，其余账号和客户都是独立参与者，不能担任组织者或替坐席推广。"
-            "人格要覆盖好奇、务实、直率、谨慎、热情、犹豫等不同反应；不要把所有角色都设为风险提醒者。"
-            "角色卡是跨场景的稳定行为设定，不知道也不提及当前活动、链接、截图、奖励、付款、经理或任务步骤。"
-            "大部分角色应能在自己觉得合适时主动尝试、交流或行动；最多两人以核验和观望为主要特征。"
-            "让同一情境下的人作不同选择，不要把所有人都写成先要求外部证明。"
-            "根据 output_language 为不同角色设计真实的当地口语习惯，但不要套用刻板印象或强塞俚语。"
-            "只返回 JSON 对象：persona_cards 是角色名到 identity、priority、decision_rule、voice、social_style、speech_habits、reaction_cues、speech_avoid 八项的映射。"
-            "identity 写稳定的身份倾向；priority 写当前最关注什么；decision_rule 写在什么条件下继续、质疑或退出；"
-            "voice 写句长和说话节奏；social_style 写如何回应别人；speech_habits 给一到两个 output_language 的自然短语或句式，"
-            "只偶尔使用，不能让每句都带同一句口头禅。reaction_cues 用一到两个‘情境→反应’说明人格如何介入选择；"
-            "speech_avoid 写该角色不应反复使用的说法。其余各项用简短中文描述，不要加入不存在的角色。",
-            {"roles": ["坐席"] + roles,
-             "output_language": language_context(payload.language)}, temperature=0.8,
-            model_name=os.getenv("MODEL_PERSONA_NAME")),
-            timeout=float(os.getenv("PERSONA_SUGGEST_TIMEOUT_SECONDS", "30")))
-        proposed = result.get("persona_cards", {})
-        if isinstance(proposed, dict):
-            for role in personas:
-                value = proposed.get(role)
-                if isinstance(value, dict):
-                    for field in cards[role]:
-                        entry = value.get(field)
-                        if (isinstance(entry, str) and 2 <= len(entry.strip()) <= (300 if field == "reaction_cues" else 180)
-                                and (role == "坐席" or not re.search(r"链接|截图|奖励|付款|付费|经理|商品|活动|任务", entry))):
-                            cards[role][field] = entry.strip()
-                            source = "model"
-                    personas[role] = cards[role]["identity"]
-        legacy = result.get("personas", {})
-        if isinstance(legacy, dict):
-            for role in personas:
-                value = legacy.get(role)
-                if isinstance(value, str) and 4 <= len(value.strip()) <= 100 and not isinstance(proposed.get(role), dict):
-                    personas[role] = value.strip()
-                    cards[role]["identity"] = value.strip()
-                    source = "model"
-    except (RuntimeError, ValueError, KeyError, TypeError, TimeoutError, httpx.HTTPError, json.JSONDecodeError):
-        pass
-    return {"personas": personas, "persona_cards": cards, "source": source}
+    selected = default_entries(['坐席'] + roles, payload.language)
+    cards = {role: dict(entry['card']) for role, entry in selected.items()}
+    return {'personas': {role: card['identity'] for role, card in cards.items()},
+            'persona_cards': cards, 'source': 'library',
+            'persona_sources': {role: entry['id'] for role, entry in selected.items()},
+            'persona_names': {role: entry['name'] for role, entry in selected.items()}}
 
 
 @app.post("/api/simulations")
@@ -590,9 +554,15 @@ async def start_simulation(config: SimulationConfig) -> dict:
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(422, str(exc)) from exc
     normalized_config = config.model_dump()
+    normalized_config['opening_policy'] = opening_policy(config.target_messages)
+    schedule = opening_schedule(schedule, normalized_config['opening_policy'])
     normalized_config["reasoning_effort"] = model_reasoning_effort(normalized_config)
     roles = ["坐席"] + template["source"]["accounts"] + [f"客户{i + 1}" for i in range(config.customer_count)]
     defaults = default_persona_cards(roles, config.language)
+    for role, entry in default_entries(roles, config.language).items():
+        if role not in config.persona_cards and role not in config.personas:
+            normalized_config['persona_sources'][role] = entry['id']
+            normalized_config['persona_versions'][role] = entry['version']
     normalized_config["persona_cards"] = {
         role: {field: str(normalized_config["persona_cards"].get(role, {}).get(field)
                           or (config.personas.get(role) if field == "identity" else None)
@@ -677,6 +647,7 @@ async def resume(session_id: str) -> dict:
     if run["status"] != "paused" and not resumable_failure:
         raise HTTPException(409, "当前模拟无法继续")
     run["status"] = "running"
+    run['schedule'] = opening_schedule(run['schedule'], run['config'].get('opening_policy'))
     run.setdefault("model_routes", {})["repair"] = dialogue_repair_model(run["config"])
     if resumable_failure:
         run["recovery_guidance"] = "；".join(str(error) for error in run.get("errors", [])[:2])[:600]
@@ -785,6 +756,9 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "还要按 output_language 检查长对话里不同角色是否反复共用同一种汇报句式，是否连续把每句话写成‘已完成、下一步、等待确认’，"
         "以及是否多人轮流重复同一未知条件或风险提醒；保留必要提醒，但不要让它占据整段对话。"
         "以及角色口吻是否逐渐混成同一个人。style_findings 是带原句的候选证据，须结合上下文判断；确实有不同观察或自然回应时不要误报。"
+        "opening_contract规定开场先打招呼和日常接话，再由参与者询问群用途、坐席回应，最后进入正题。"
+        "检查是否第一条就宣讲目的、没有暖场直接操作、所有人轮流报到，或在坐席解释后仍反复问群用途。"
+        "正常寒暄、玩笑和人物相互熟悉属于有效交流，不因没有业务动作而报错；不强迫所有人都开口。"
         "public_decisions 是带原话的个人选择。区分活动时段与个人准备时间等不同事项；同一事项前后改变须有具体原因。"
         "坐席在最后一条前告别全群或宣布结束（包括 See you...）也应指出。"
         "普通说明、母本引文和历史经历须转述为 output_language，台词夹入其他语言的完整普通句子应指出；链接、联系人、代码及人物称呼保留原值。"
@@ -802,6 +776,7 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "insight 用 output_language 写一句本人实际表达过的偏好或对他人的认识，关系需有具体互动。"
         "不得虚构、改变稳定人格或沿用本轮已提交、已打开、暂停等操作状态；没有依据时为空数组。",
         {"goal": template["analysis"].get("primary_goal"),
+         "opening_contract": opening_requirement(run) if run['config'].get('opening_policy') else None,
          "public_decisions": decision_ledger(run),
          "completion_actions": template["analysis"].get("completion_actions"),
          "persona_cards": run["config"].get("persona_cards", {}),
