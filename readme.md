@@ -77,7 +77,7 @@ https://github.com/user-attachments/assets/5bad46b2-8276-4e1d-9480-3522640744b2
 
 ### 中文工作台与母本群聊
 
-原工作台已中文化，并集成母本 Excel 导入、目标确认、自由参与者、群聊生成、角色记忆和九列 Excel / JSON 导出。入口、项目列表和文件视图共用原工作台；无需打开另一套界面。安装与运行见 [群聊模式说明](dialogue/README.md)，实现计划及检查结果见 [计划](docs/DIALOGUE_MODE_PLAN.md) 和 [验证记录](docs/DIALOGUE_VALIDATION.md)。
+原工作台已中文化并精简为母本 Excel 导入、目标确认、自由参与者、群聊生成、角色记忆和九列 Excel / JSON 导出。侧栏保留群聊剧本、新建剧本、模型设置与剧本记录；小说事件因果结构在内部帮助规划对话。安装与运行见 [群聊模式说明](dialogue/README.md)，实现计划及检查结果见 [计划](docs/DIALOGUE_MODE_PLAN.md) 和 [验证记录](docs/DIALOGUE_VALIDATION.md)。
 
 ViMax is an agentic video creation framework that connects narrative planning, visual consistency, image generation, video generation, and final assembly in one extensible workflow.
 

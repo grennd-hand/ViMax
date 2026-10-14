@@ -22,6 +22,7 @@ from .memory_store import SQLiteMemoryStore
 from .memory_cognition import prepare_memory_context
 from .dialogue_quality import explicit_refusal
 from .scene_memory import apply_review_actions, apply_review_decisions
+from .narrative_plan import planning_requirement, parse_plan
 
 ROOT = Path(__file__).resolve().parents[3]
 PLAN_PROMPT = """你是擅长写真实多人群聊的编剧。母本坐席内容是业务事实和引导目标，人物不是客服或审核员。只写精简的可执行事件线，不写电影故事、旁白、抽象主题、人物小传或逐句台词。先列12到18个互不重复的具体交流事件，每个事件写消息区间、谁有实际新问题、当下变化和与下一事件的接续。把人物的动机、个人时间安排、相互接话和实际操作穿插起来；不按人头轮流复述流程。业务信息只能来自母本，不编造页面功能、故障或提交许可。规划一次完整行动在最后10%篇幅才完成，前面围绕不同真实内容推进，不能提前完成后用等待凑数。结尾短，真实目标必须完成。"""
@@ -146,9 +147,10 @@ async def process(session_id, api):
                 api.save_run(run)
                 writer = writer_type(chat_model=RecordedChat(chat, api, session_id, "plan"))
                 story = await writer.develop_story("根据坐席母本目的，设计群聊事件线。", contract +
-                    "只输出精简事件大纲，不写完整剧本；每个事件提供不同的交流内容、变化与目标贡献；不要按人头轮流报告。",system_prompt=PLAN_PROMPT)
+                    "只输出精简事件大纲，不写完整剧本；每个事件提供不同的交流内容、变化与目标贡献；不要按人头轮流报告。" + planning_requirement(run),system_prompt=PLAN_PROMPT)
                 run = api.get_run(session_id)
-                run["vimax_story"] = story
+                run["vimax_events"] = parse_plan(story, run)
+                run["vimax_story"] = json.dumps({"events": run["vimax_events"]}, ensure_ascii=False)
                 api.save_run(run)
             if not run.get("vimax_draft"):
                 writer = writer_type(chat_model=RecordedChat(chat, api, session_id, "write"))

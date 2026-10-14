@@ -53,7 +53,12 @@ function CharacterMemory({ run, name, session }) {
   </div>
 }
 
-export default function DialogueWorkspace({ runId, onRunChanged }) {
+function EventPlan({run}) {
+  if (!run.vimax_events?.length) return null
+  return <Card eyebrow="本轮规划" title="对话安排"><p className="muted">以下是计划发生的交流。实际进展以群聊中说出和完成的内容为准。</p><details className="story-arc"><summary>查看 {run.vimax_events.length} 个事件</summary><ol>{run.vimax_events.map(event => <li key={event.index}><strong>{event.description}</strong><small>第 {event.message_start}—{event.message_end} 条 · {event.roles.join('、')}</small><p>起因：{event.cause}</p><p>{event.process_chain.join(' → ')}</p><p>变化：{event.outcome}</p></li>)}</ol></details></Card>
+}
+
+export default function DialogueWorkspace({ runId, startFresh = false, onRunChanged }) {
   const [step, setStep] = useState(0)
   const [template, setTemplate] = useState(null)
   const [goal, setGoal] = useState(null)
@@ -84,10 +89,13 @@ export default function DialogueWorkspace({ runId, onRunChanged }) {
 
   useEffect(() => { api('/api/health').then(h => setModelReady(h.model_configured)).catch(() => {}) }, [])
   useEffect(() => {
+    if (startFresh && !runId) return
+    let cancelled = false
     const id = runId || new URLSearchParams(window.location.search).get('run') || window.localStorage.getItem('vimax-dialogue-run-id')
     if (!id) return
     api(`/api/simulations/${id}`).then(async previous => {
       const saved = await api(`/api/templates/${previous.template_id}`)
+      if (cancelled) return
       const messages = saved.source.messages
       const stats = { messages: messages.length, seat_messages: messages.filter(item => item.sender === '坐席').length,
         accounts: saved.source.accounts, image_codes: messages.filter(item => item.image_code).length }
@@ -105,8 +113,9 @@ export default function DialogueWorkspace({ runId, onRunChanged }) {
       setCharacterIds(previous.config.character_ids || {})
       setLanguage(previous.config.language === '中文' ? 'zh-CN' : previous.config.language || 'zh-CN')
       setRun(previous); setStep(3)
-    }).catch(() => window.localStorage.removeItem('vimax-dialogue-run-id'))
-  }, [runId])
+    }).catch(() => { if (!cancelled) window.localStorage.removeItem('vimax-dialogue-run-id') })
+    return () => { cancelled = true }
+  }, [runId, startFresh])
   useEffect(() => {
     if (step !== 2 || !template?.id || Number(customerCount) < 1 || Number(customerCount) > 20 || !/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(language.trim())) return
     let cancelled = false
@@ -309,7 +318,7 @@ export default function DialogueWorkspace({ runId, onRunChanged }) {
         {run.pause_reason && <div className="error-banner pause-banner">{run.pause_reason}</div>}
         <div className="chat-scroll">{!run.messages?.length && <div className="chat-empty">正在安排第一条消息…</div>}{(run.messages || []).map(message => <Bubble message={message} language={run.config?.language || language} key={message.seq} />)}<div ref={bottom} /></div>
         <div className="chat-actions">{run.status === 'running' && <button className="button ghost" onClick={() => action('pause')}><PauseCircle size={17} />暂停</button>}{run.status === 'paused' && <button className="button ghost" onClick={() => action('resume')}><PlayCircle size={17} />继续</button>}{run.status === 'failed' && <button className="button ghost" onClick={() => action('resume')}><PlayCircle size={17} />{run.cursor < (run.schedule?.length || 0) ? '从失败处继续' : '重新复核'}</button>}{finished && <button className="button ghost" onClick={() => action('retry')}><ArrowClockwise size={17} />重试生成</button>}</div></Card>
-        <div className="right-rail">{run.story_arc?.length > 0 && <Card eyebrow="剧情规划" title="本轮事件线"><p className="muted">{['model', 'model-revised', 'model-topics', 'cached-model-topics'].includes(run.story_arc_source) ? '根据母本规划' : run.story_arc_source === 'topic-poor' ? '话题多样性不足' : run.story_arc_source === 'hybrid' ? '母本与通用事件结合' : '使用通用事件线'} · {run.story_arc.length} 个情节点。事件只在角色公开说出后才算发生。</p><details className="story-arc"><summary>查看全部情节点</summary><ol>{run.story_arc.map((beat, index) => <li key={index} className={!(run.scene_progress || []).some(item => item.id === index && item.state === "resolved") && index === run.story_arc.findIndex((beat, id) => !(run.scene_progress || []).some(item => item.id === id && item.state === "resolved") && (beat.kind !== "closure" || run.cursor >= run.schedule.length - 3)) ? 'current' : ''}>{beat.event}{beat.characters?.length > 0 && <small>建议：{beat.characters.join('、')}</small>}</li>)}</ol></details></Card>}<Card eyebrow="06 / 人物会话" title="独立角色会话"><p className="muted">每个角色保留自己的会话记忆，共同读取群聊记录。客户按人格和对话自行决定是否继续、拒绝或离开。</p>{run.config?.memory_enabled && <p className="muted">{({ semantic: '已启用多语言语义检索', lexical: '当前使用文字检索', empty: '人物从本轮开始积累经历' })[run.memory_status?.mode] || '正在读取相关人物经历'} · 本轮想起 {run.memory_status?.recalled || 0} 条。历史动作不计入本轮进度。</p>}<div className="agent-session-list">{Object.entries(run.agent_sessions || {}).map(([name, session]) => <div className="agent-session-item" key={name}><div className="agent-session-head"><strong>{name}</strong><span>{session.turns} 次发言</span></div><details><summary>本轮记住 {session.memory_events?.length || 0} 件事</summary>{(session.memory_events || []).slice(-5).map((event, index) => <p key={`${event.seq}-${event.kind}-${index}`}>#{event.seq} {({ own_action: '自己做过', own_decision: '自己的决定', said_to: `对${event.peer}说`, heard_from: `${event.peer}对我说` })[event.kind] || '经历'}：{event.text}</p>)}</details><CharacterMemory run={run} name={name} session={session} /></div>)}</div></Card>
+        <div className="right-rail"><EventPlan run={run} />{run.story_arc?.length > 0 && <Card eyebrow="剧情规划" title="本轮事件线"><p className="muted">{['model', 'model-revised', 'model-topics', 'cached-model-topics'].includes(run.story_arc_source) ? '根据母本规划' : run.story_arc_source === 'topic-poor' ? '话题多样性不足' : run.story_arc_source === 'hybrid' ? '母本与通用事件结合' : '使用通用事件线'} · {run.story_arc.length} 个情节点。事件只在角色公开说出后才算发生。</p><details className="story-arc"><summary>查看全部情节点</summary><ol>{run.story_arc.map((beat, index) => <li key={index} className={!(run.scene_progress || []).some(item => item.id === index && item.state === "resolved") && index === run.story_arc.findIndex((beat, id) => !(run.scene_progress || []).some(item => item.id === id && item.state === "resolved") && (beat.kind !== "closure" || run.cursor >= run.schedule.length - 3)) ? 'current' : ''}>{beat.event}{beat.characters?.length > 0 && <small>建议：{beat.characters.join('、')}</small>}</li>)}</ol></details></Card>}<Card eyebrow="06 / 人物会话" title="独立角色会话"><p className="muted">每个角色保留自己的会话记忆，共同读取群聊记录。客户按人格和对话自行决定是否继续、拒绝或离开。</p>{run.config?.memory_enabled && <p className="muted">{({ semantic: '已启用多语言语义检索', lexical: '当前使用文字检索', empty: '人物从本轮开始积累经历' })[run.memory_status?.mode] || '正在读取相关人物经历'} · 本轮想起 {run.memory_status?.recalled || 0} 条。历史动作不计入本轮进度。</p>}<div className="agent-session-list">{Object.entries(run.agent_sessions || {}).map(([name, session]) => <div className="agent-session-item" key={name}><div className="agent-session-head"><strong>{name}</strong><span>{session.turns} 次发言</span></div><details><summary>本轮记住 {session.memory_events?.length || 0} 件事</summary>{(session.memory_events || []).slice(-5).map((event, index) => <p key={`${event.seq}-${event.kind}-${index}`}>#{event.seq} {({ own_action: '自己做过', own_decision: '自己的决定', said_to: `对${event.peer}说`, heard_from: `${event.peer}对我说` })[event.kind] || '经历'}：{event.text}</p>)}</details><CharacterMemory run={run} name={name} session={session} /></div>)}</div></Card>
           <Card eyebrow="07 / 检查与导出" title="生成结果"><div className={`result-banner ${valid && goalMet ? 'good' : ''}`}>{run.status === 'completed' ? '成功路径已完成' : run.status === 'early_end' ? goalMet ? '客户提前结束分支' : '本轮目标未达成' : run.status === 'failed' ? '生成未通过' : '模拟进行中'}</div>{!goalMet && run.outcome_review?.reason && <p className="validation-error">{run.outcome_review.reason}</p>}{[...(run.validation || []), ...(run.errors || [])].map((item, i) => <p className="validation-error" key={i}>{item}</p>)}<div className="download-row"><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/xlsx` : undefined}><ArrowDown size={17} />下载 Excel</a><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/json` : undefined}><ArrowDown size={17} />下载 JSON</a></div></Card></div></div>}
     </main>
   </div>

@@ -1,594 +1,123 @@
-import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
-import {
-  ArrowUp,
-  Brain,
-  Braces,
-  CircleStop,
-  Clock3,
-  FilePenLine,
-  FileText,
-  Film,
-  Folder,
-  FolderPlus,
-  Files,
-  Image as ImageIcon,
-  Menu,
-  Moon,
-  PanelLeftClose,
-  PanelLeftOpen,
-  PanelRight,
-  Plus,
-  Save,
-  Search,
-  Settings,
-  ListChecks,
-  Terminal,
-  Trash2,
-  Sun,
-  Wrench,
-  X,
-} from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import {deleteSession, getAgentConfig, getArtifacts, getHistory, getSessions, saveAgentConfig, sendMessage, startAgent, stopAgent, subscribeToEvents, uploadWorkspaceFile} from './api';
+import {useCallback, useEffect, useState} from 'react';
+import {Files, FolderPlus, Menu, Moon, PanelLeftClose, PanelLeftOpen, Save, Settings, Sun, X} from 'lucide-react';
+import {getAgentConfig, getSessions, saveAgentConfig} from './api';
 import DialogueWorkspace from './DialogueWorkspace';
 import './dialogue.css';
-import {ArtifactsView, StoryboardPanel} from './ArtifactViews';
-import {applyAgentEvent, appendLocalUser, composeAgentPrompt, createChatState, humanize} from './events';
-import {matchingSlashCommands, shouldShowSlashCommands, type SlashCommandMatch} from './slashCommands';
 import {applyTheme, resolveTheme, THEME_STORAGE_KEY, type Theme} from './theme';
-import type {AgentConfig, AgentEvent, Artifact, ChatState, ConfigSection, Message, SessionSummary, WorkspaceUpload} from './types';
+import type {AgentConfig, ConfigSection, SessionSummary} from './types';
 
-const CONTEXT_TARGET = 160_000;
-
-type WorkspaceView = 'workspace' | 'artifacts' | 'settings' | 'dialogue';
+type WorkspaceView = 'dialogue' | 'settings';
 
 export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState('');
-  const [chat, setChat] = useState<ChatState>(() => createChatState());
-  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(new URLSearchParams(location.search).get('view') === 'dialogue' ? 'dialogue' : 'workspace');
   const [dialogueRunId, setDialogueRunId] = useState(new URLSearchParams(location.search).get('run') || '');
-  const [agentReady, setAgentReady] = useState(false);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('dialogue');
+  const [freshProject, setFreshProject] = useState(false);
+  const [projectVersion, setProjectVersion] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [storyboardPanelOpen, setStoryboardPanelOpen] = useState(false);
-  const [storyboardCount, setStoryboardCount] = useState(0);
   const [theme, setTheme] = useState<Theme>(() => resolveTheme(document.documentElement.dataset.theme, false));
-  const [draft, setDraft] = useState('');
-  const [workspaceUploads, setWorkspaceUploads] = useState<WorkspaceUpload[]>([]);
-  const [uploadingFiles, setUploadingFiles] = useState(false);
   const [loadError, setLoadError] = useState('');
-  const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [newProjectName, setNewProjectName] = useState('');
-  const [newProjectError, setNewProjectError] = useState('');
-  const [creatingProject, setCreatingProject] = useState(false);
-  const [pendingDelete, setPendingDelete] = useState<SessionSummary>();
-  const [deleting, setDeleting] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const selectedSession = sessions.find((session) => session.sessionId === selectedSessionId);
-  const slashMatches = useMemo(() => matchingSlashCommands(draft), [draft]);
-  const showSlashCommands = shouldShowSlashCommands(draft, chat.busy);
-  const runningRender = useMemo(
-    () => [...chat.messages].reverse().find((message) => message.role === 'activity'
-      && message.status === 'running'
-      && (message.tool || '').toLowerCase().includes('render_video')),
-    [chat.messages],
-  );
 
   useEffect(() => {
     applyTheme(theme);
-    try {
-      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-    } catch {
-      // Theme still applies when persistence is unavailable.
-    }
+    try { window.localStorage.setItem(THEME_STORAGE_KEY, theme); } catch { /* Theme remains usable. */ }
   }, [theme]);
 
   const refreshSessions = useCallback(async () => {
     const state = await getSessions();
-    setSessions(state.sessions);
-    return state;
+    const projects = state.sessions.filter((item) => item.dialogueRunId);
+    setSessions(projects);
+    return {state, projects};
   }, []);
-
-  const refreshArtifacts = useCallback(async (sessionId: string) => {
-    if (!sessionId) {
-      setArtifacts([]);
-      return;
-    }
-    const payload = await getArtifacts(sessionId);
-    setArtifacts(payload.artifacts);
-  }, []);
-
-  useEffect(() => subscribeToEvents((event) => {
-    if (event.type === 'sessions_changed') {
-      setSessions(event.sessions || []);
-      if (event.activeSessionId) setSelectedSessionId(event.activeSessionId);
-      return;
-    }
-    if (event.type === 'bridge_status') {
-      if (event.status === 'ready' || event.status === 'starting') setAgentReady(true);
-      if (event.status === 'stopped' || event.status === 'error') setAgentReady(false);
-    }
-    if (event.type === 'session') {
-      const sessionId = event.session?.active_session_id || event.session?.session?.session_id || '';
-      if (sessionId) {
-        setSelectedSessionId(sessionId);
-        void refreshSessions();
-        void refreshArtifacts(sessionId);
-      }
-    }
-    setChat((current) => applyAgentEvent(current, event));
-  }, () => undefined), [refreshArtifacts, refreshSessions]);
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
-      try {
-        const state = await refreshSessions();
-        if (cancelled || !state.activeSessionId) return;
-        const dialogue = state.sessions.find((item) => item.sessionId === state.activeSessionId)?.dialogueRunId;
-        if (dialogue) { setSelectedSessionId(state.activeSessionId); setDialogueRunId(dialogue); setWorkspaceView('dialogue'); return; }
-        setSelectedSessionId(state.activeSessionId);
-        const [history] = await Promise.all([
-          getHistory(state.activeSessionId),
-          refreshArtifacts(state.activeSessionId),
-          startAgent({sessionId: state.activeSessionId}),
-        ]);
-        if (!cancelled) {
-          setChat(createChatState(history.messages));
-          setAgentReady(true);
-        }
-      } catch (error) {
-        if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error));
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshArtifacts, refreshSessions]);
+    void refreshSessions().then(({state, projects}) => {
+      if (cancelled || new URLSearchParams(location.search).get('run')) return;
+      const savedId = window.localStorage.getItem('vimax-dialogue-run-id');
+      const previous = projects.find((item) => item.dialogueRunId === savedId)
+        || projects.find((item) => item.sessionId === state.activeSessionId) || projects[0];
+      if (previous?.dialogueRunId) setDialogueRunId(previous.dialogueRunId);
+    }).catch((error) => !cancelled && setLoadError(String(error.message || error)));
+    return () => { cancelled = true; };
+  }, [refreshSessions]);
 
-  useEffect(() => {
-    if (!runningRender || !selectedSessionId) return;
-    void refreshArtifacts(selectedSessionId);
-    const interval = window.setInterval(() => void refreshArtifacts(selectedSessionId), 2_000);
-    return () => {
-      window.clearInterval(interval);
-      void refreshArtifacts(selectedSessionId);
-    };
-  }, [refreshArtifacts, runningRender, selectedSessionId]);
-
-  useEffect(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-    element.scrollTo({top: element.scrollHeight, behavior: chat.busy ? 'smooth' : 'auto'});
-  }, [chat.messages, chat.busy]);
-
-  useEffect(() => {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    textarea.style.height = '0px';
-    textarea.style.height = `${Math.min(168, Math.max(28, textarea.scrollHeight))}px`;
-  }, [draft]);
-
-  useEffect(() => {
-    setWorkspaceUploads([]);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  }, [selectedSessionId]);
-
-  async function openSession(sessionId: string) {
-    const dialogue = sessions.find((item) => item.sessionId === sessionId)?.dialogueRunId;
-    if (dialogue) { setSelectedSessionId(sessionId); setDialogueRunId(dialogue); setWorkspaceView('dialogue'); setMobileSidebarOpen(false); return; }
-    if (!sessionId || sessionId === selectedSessionId) {
-      setMobileSidebarOpen(false);
-      return;
-    }
-    setLoadError('');
-    setSelectedSessionId(sessionId);
+  function openProject(id: string) {
+    setDialogueRunId(id);
+    setFreshProject(false);
+    setWorkspaceView('dialogue');
     setMobileSidebarOpen(false);
-    setChat(createChatState());
-    try {
-      const [history] = await Promise.all([
-        getHistory(sessionId),
-        refreshArtifacts(sessionId),
-        startAgent({sessionId}),
-      ]);
-      setChat(createChatState(history.messages));
-      setAgentReady(true);
-    } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error));
-    }
+    window.history.replaceState(null, '', `/?run=${encodeURIComponent(id)}`);
   }
 
-  function openNewProjectDialog() {
-    setNewProjectName('');
-    setNewProjectError('');
-    setNewProjectOpen(true);
-  }
-
-  async function newProject() {
-    const projectName = newProjectName.trim();
-    if (!projectName || creatingProject) return;
-    setCreatingProject(true);
-    setNewProjectError('');
-    setLoadError('');
+  function newProject() {
+    setDialogueRunId('');
+    setFreshProject(true);
+    setProjectVersion((value) => value + 1);
+    setWorkspaceView('dialogue');
     setMobileSidebarOpen(false);
-    try {
-      await startAgent({newSession: true, projectName});
-      setAgentReady(true);
-      await new Promise((resolve) => window.setTimeout(resolve, 450));
-      const state = await refreshSessions();
-      setSelectedSessionId(state.activeSessionId);
-      setChat(createChatState());
-      setArtifacts([]);
-      setWorkspaceView('workspace');
-      setNewProjectOpen(false);
-      setNewProjectName('');
-      textareaRef.current?.focus();
-    } catch (error) {
-      setNewProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setCreatingProject(false);
-    }
+    window.localStorage.removeItem('vimax-dialogue-run-id');
+    window.history.replaceState(null, '', '/');
   }
 
-  async function submit() {
-    const text = draft.trim();
-    if (!text || chat.busy || uploadingFiles) return;
-    setLoadError('');
-    setDraft('');
-    setChat((current) => appendLocalUser(current, text));
-    try {
-      if (!agentReady) {
-        await startAgent(selectedSessionId ? {sessionId: selectedSessionId} : {newSession: true});
-        setAgentReady(true);
-      }
-      const outbound = composeAgentPrompt(text, workspaceUploads.map((file) => file.path));
-      await sendMessage(outbound);
-      setWorkspaceUploads([]);
-    } catch (error) {
-      const event: AgentEvent = {type: 'error', message: error instanceof Error ? error.message : String(error)};
-      setChat((current) => applyAgentEvent(current, event));
-    }
+  function runChanged(id: string) {
+    setDialogueRunId(id);
+    window.history.replaceState(null, '', `/?run=${encodeURIComponent(id)}`);
+    void refreshSessions().catch((error) => setLoadError(String(error.message || error)));
   }
 
-  async function uploadFiles(files: FileList | null) {
-    const sessionId = selectedSessionId;
-    if (!files?.length) return;
-    if (!sessionId) {
-      setLoadError('Create or select a project before uploading files');
-      return;
-    }
-    setUploadingFiles(true);
-    setLoadError('');
-    let uploadedAny = false;
-    try {
-      for (const file of Array.from(files)) {
-        const result = await uploadWorkspaceFile(sessionId, file);
-        uploadedAny = true;
-        setWorkspaceUploads((current) => [
-          ...current.filter((item) => item.path !== result.file.path),
-          result.file,
-        ]);
-      }
-    } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      if (uploadedAny) await refreshArtifacts(sessionId);
-      setUploadingFiles(false);
-      textareaRef.current?.focus();
-    }
-  }
-
-  async function stop() {
-    await stopAgent();
-    setAgentReady(false);
-    setChat((current) => ({...current, busy: false}));
-  }
-
-  async function confirmDelete() {
-    if (!pendingDelete || deleting) return;
-    const sessionId = pendingDelete.sessionId;
-    const deletingSelected = sessionId === selectedSessionId;
-    setDeleting(true);
-    setLoadError('');
-    try {
-      const state = await deleteSession(sessionId);
-      setSessions(state.sessions);
-      setPendingDelete(undefined);
-      if (deletingSelected) {
-        setSelectedSessionId('');
-        setChat(createChatState());
-        setArtifacts([]);
-        setAgentReady(false);
-        if (state.activeSessionId) await openSession(state.activeSessionId);
-      }
-    } catch (error) {
-      setLoadError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDeleting(false);
-    }
-  }
-
-  const contextPercent = Math.min(100, Math.round((chat.promptTokens / CONTEXT_TARGET) * 100));
-  const hasConversation = chat.messages.length > 0;
-
-  return (
-    <div className="app-shell">
-      <Sidebar
-        open={sidebarOpen}
-        mobileOpen={mobileSidebarOpen}
-        sessions={sessions}
-        selectedSessionId={selectedSessionId}
-        activeView={workspaceView}
-        onToggle={() => setSidebarOpen((value) => !value)}
-        onMobileClose={() => setMobileSidebarOpen(false)}
-        onNew={openNewProjectDialog}
-        onSelect={(sessionId) => void openSession(sessionId)}
-        onWorkspace={() => {
-          setWorkspaceView('workspace');
-          setMobileSidebarOpen(false);
-        }}
-        onDialogue={() => { setWorkspaceView('dialogue'); setMobileSidebarOpen(false); }}
-        onArtifacts={() => {
-          setWorkspaceView('artifacts');
-          setMobileSidebarOpen(false);
-        }}
-        onSettings={() => {
-          setWorkspaceView('settings');
-          setMobileSidebarOpen(false);
-        }}
-        onDelete={setPendingDelete}
-      />
-
-      <main className="workspace-main">
-        {workspaceView === 'workspace' ? (
-          <div className="workspace-utility-bar">
-            <button className="icon-button mobile-only" onClick={() => setMobileSidebarOpen(true)} aria-label="展开导航">
-              <Menu size={19} />
+  return <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : 'sidebar-collapsed'}`}>
+    {mobileSidebarOpen && <button className="sidebar-scrim" onClick={() => setMobileSidebarOpen(false)} aria-label="关闭导航" />}
+    <aside className={`sidebar ${sidebarOpen ? 'is-open' : 'is-collapsed'} ${mobileSidebarOpen ? 'is-mobile-open' : ''}`}>
+      <div className="sidebar-brand">
+        <strong>ViMax</strong>
+        <button className="icon-button sidebar-collapse desktop-only" onClick={() => setSidebarOpen(false)} aria-label="收起导航"><PanelLeftClose size={17} /></button>
+        <button className="icon-button mobile-only" onClick={() => setMobileSidebarOpen(false)} aria-label="关闭导航"><X size={18} /></button>
+      </div>
+      <nav className="primary-nav" aria-label="主导航">
+        <button className={workspaceView === 'dialogue' ? 'is-active' : ''} onClick={() => { setWorkspaceView('dialogue'); setMobileSidebarOpen(false); }}><Files size={17} /><span>群聊剧本</span></button>
+        <button onClick={newProject}><FolderPlus size={17} /><span>新建剧本</span></button>
+        <button className={workspaceView === 'settings' ? 'is-active' : ''} onClick={() => { setWorkspaceView('settings'); setMobileSidebarOpen(false); }}><Settings size={17} /><span>模型设置</span></button>
+      </nav>
+      <div className="session-section">
+        <div className="section-label"><span>剧本记录</span><span>{sessions.length}</span></div>
+        <div className="session-list">
+          {sessions.map((session) => <div key={session.sessionId} className={`session-item ${session.dialogueRunId === dialogueRunId ? 'is-selected' : ''}`}>
+            <button className="session-open" onClick={() => openProject(session.dialogueRunId!)}>
+              <span className="session-copy"><strong>{session.projectName || '母本群聊'}</strong><small>{relativeTime(session.updatedAt)} · {stageLabel(session.stage)}</small></span>
             </button>
-            {!sidebarOpen && (
-              <button className="icon-button desktop-only" onClick={() => setSidebarOpen(true)} aria-label="展开导航">
-                <PanelLeftOpen size={18} />
-              </button>
-            )}
-            <span className="workspace-utility-spacer" />
-            <div className="workspace-utility-actions">
-              <ThemeToggle theme={theme} onToggle={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} />
-              <button className="icon-button artifact-toggle" onClick={() => setStoryboardPanelOpen((value) => !value)} aria-label="切换分镜预览">
-                <PanelRight size={18} />
-                {storyboardCount > 0 && <span className="count-badge">{storyboardCount}</span>}
-              </button>
-            </div>
-          </div>
-        ) : (
-          <header className="workspace-header">
-            <div className="workspace-title-row">
-              <button className="icon-button mobile-only" onClick={() => setMobileSidebarOpen(true)} aria-label="展开导航">
-                <Menu size={19} />
-              </button>
-              {!sidebarOpen && (
-                <button className="icon-button desktop-only" onClick={() => setSidebarOpen(true)} aria-label="展开导航">
-                  <PanelLeftOpen size={18} />
-                </button>
-              )}
-              <div className="workspace-title-copy">
-                <strong>{workspaceView === 'settings' ? '设置' : workspaceView === 'dialogue' ? '群聊剧本' : '生成文件'}</strong>
-                {workspaceView === 'settings' && <span>configs/agent.local.yaml</span>}
-              </div>
-            </div>
-            <ThemeToggle theme={theme} onToggle={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} />
-          </header>
-        )}
-
-        {workspaceView === 'dialogue' ? <DialogueWorkspace runId={dialogueRunId} onRunChanged={(id: string) => { setDialogueRunId(id); setSelectedSessionId('dialogue-' + id); void refreshSessions(); }} /> : workspaceView === 'workspace' ? (
-          <div className="conversation" ref={scrollRef}>
-            {!hasConversation ? (
-              <EmptyState theme={theme} />
-            ) : (
-              <div className="message-stream">
-                {chat.messages.map((message) => <MessageRow key={message.id} message={message} />)}
-                {chat.busy && <ThinkingRow messages={chat.messages} />}
-              </div>
-            )}
-          </div>
-        ) : workspaceView === 'artifacts' ? (
-          <ArtifactsView session={selectedSession} artifacts={artifacts} />
-        ) : (
-          <SettingsView />
-        )}
-
-        {workspaceView === 'workspace' && <div className="composer-zone">
-          {loadError && (
-            <div className="inline-error" role="alert">
-              <span>{loadError}</span>
-              <button onClick={() => setLoadError('')} aria-label="关闭错误提示"><X size={15} /></button>
-            </div>
-          )}
-          {showSlashCommands && <SlashCommandMenu matches={slashMatches} contextPercent={contextPercent} onSelect={(command) => {
-            setDraft(command);
-            textareaRef.current?.focus();
-          }} />}
-          <div className={`composer ${chat.busy ? 'is-busy' : ''}`}>
-            <textarea
-              ref={textareaRef}
-              value={draft}
-              onChange={(event) => setDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Tab' && slashMatches[0]) {
-                  event.preventDefault();
-                  setDraft(slashMatches[0].name);
-                  return;
-                }
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder="描述你想创作的内容"
-              aria-label="向 ViMax 描述你的创作需求"
-              disabled={chat.busy}
-              rows={1}
-            />
-            {(workspaceUploads.length > 0 || uploadingFiles) && (
-              <div className="composer-attachments" aria-live="polite">
-                {workspaceUploads.map((file) => (
-                  <span className="composer-attachment" key={file.path} title={file.path}>
-                    <FileText size={13} />
-                    <span>{file.name}</span>
-                    <button
-                      type="button"
-                      onClick={() => setWorkspaceUploads((current) => current.filter((item) => item.path !== file.path))}
-                      aria-label={`从消息中移除 ${file.name}`}
-                    >
-                      <X size={12} />
-                    </button>
-                  </span>
-                ))}
-                {uploadingFiles && <span className="composer-uploading">正在上传…</span>}
-              </div>
-            )}
-            <div className="composer-controls">
-              <input
-                ref={fileInputRef}
-                className="composer-file-input"
-                type="file"
-                multiple
-                onChange={(event) => void uploadFiles(event.currentTarget.files)}
-                tabIndex={-1}
-              />
-              <button
-                type="button"
-                className="composer-add"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={!selectedSessionId || uploadingFiles || chat.busy}
-                aria-label="上传素材"
-                aria-busy={uploadingFiles}
-                title={selectedSessionId ? '上传素材' : '请先新建或选择项目'}
-              >
-                <Plus size={20} />
-              </button>
-              <div className="composer-spacer" />
-              {chat.busy ? (
-                <button className="send-button stop" onClick={() => void stop()} aria-label="停止生成"><CircleStop size={18} /></button>
-              ) : (
-                <button className="send-button" onClick={() => void submit()} disabled={!draft.trim() || uploadingFiles} aria-label="发送"><ArrowUp size={19} /></button>
-              )}
-            </div>
-          </div>
-        </div>}
-      </main>
-
-      {workspaceView === 'workspace' && <StoryboardPanel
-        open={storyboardPanelOpen && workspaceView === 'workspace'}
-        artifacts={artifacts}
-        activeRenderStage={runningRender?.stage}
-        onClose={() => setStoryboardPanelOpen(false)}
-        onCountChange={setStoryboardCount}
-      />}
-      <DeleteProjectDialog
-        session={pendingDelete}
-        deleting={deleting}
-        onCancel={() => !deleting && setPendingDelete(undefined)}
-        onConfirm={() => void confirmDelete()}
-      />
-      <NewProjectDialog
-        open={newProjectOpen}
-        name={newProjectName}
-        error={newProjectError}
-        creating={creatingProject}
-        onNameChange={(value) => {
-          setNewProjectName(value);
-          setNewProjectError('');
-        }}
-        onCancel={() => {
-          if (creatingProject) return;
-          setNewProjectOpen(false);
-          setNewProjectError('');
-        }}
-        onConfirm={() => void newProject()}
-      />
-    </div>
-  );
+          </div>)}
+          {!sessions.length && <span className="empty-list">暂无剧本</span>}
+        </div>
+      </div>
+      <div className="sidebar-footer"><span className="avatar">V</span><div><strong>群聊创作工作台</strong><small>本地 · ViMax</small></div></div>
+    </aside>
+    <main className="workspace-main">
+      <header className="workspace-header">
+        <div className="workspace-title-row">
+          <button className="icon-button mobile-only" onClick={() => setMobileSidebarOpen(true)} aria-label="展开导航"><Menu size={18} /></button>
+          {!sidebarOpen && <button className="icon-button desktop-only" onClick={() => setSidebarOpen(true)} aria-label="展开导航"><PanelLeftOpen size={18} /></button>}
+          <strong>{workspaceView === 'settings' ? '模型设置' : '群聊剧本'}</strong>
+        </div>
+        <ThemeToggle theme={theme} onToggle={() => setTheme(theme === 'dark' ? 'light' : 'dark')} />
+      </header>
+      {loadError && <div className="load-error" role="alert">{loadError}<button onClick={() => setLoadError('')} aria-label="关闭错误提示"><X size={15} /></button></div>}
+      <div key={projectVersion} style={{display: workspaceView === 'dialogue' ? undefined : 'none', flex: 1, minHeight: 0, overflow: 'auto'}}>
+        <DialogueWorkspace runId={dialogueRunId} startFresh={freshProject} onRunChanged={runChanged} />
+      </div>
+      {workspaceView === 'settings' && <SettingsView />}
+    </main>
+  </div>;
 }
 
-function Sidebar({open, mobileOpen, sessions, selectedSessionId, activeView, onToggle, onMobileClose, onNew, onSelect, onWorkspace, onArtifacts, onSettings, onDialogue, onDelete}: {
-  open: boolean;
-  mobileOpen: boolean;
-  sessions: SessionSummary[];
-  selectedSessionId: string;
-  activeView: WorkspaceView;
-  onToggle: () => void;
-  onMobileClose: () => void;
-  onNew: () => void;
-  onSelect: (sessionId: string) => void;
-  onWorkspace: () => void;
-  onArtifacts: () => void;
-  onSettings: () => void;
-  onDialogue: () => void;
-  onDelete: (session: SessionSummary) => void;
-}) {
-  return (
-    <>
-      {mobileOpen && <button className="sidebar-scrim" onClick={onMobileClose} aria-label="关闭导航" />}
-      <aside className={`sidebar ${open ? 'is-open' : 'is-collapsed'} ${mobileOpen ? 'is-mobile-open' : ''}`}>
-        <div className="sidebar-brand">
-          <strong>ViMax</strong>
-          <button className="icon-button sidebar-collapse desktop-only" onClick={onToggle} aria-label="收起导航">
-            <PanelLeftClose size={17} />
-          </button>
-          <button className="icon-button mobile-only" onClick={onMobileClose} aria-label="关闭导航"><X size={18} /></button>
-        </div>
-        <nav className="primary-nav" aria-label="主导航">
-          <button className={activeView === "dialogue" ? "is-active" : ""} onClick={onDialogue}><Files size={17} /><span>群聊剧本</span></button>
-          <button onClick={onNew}><FolderPlus size={17} /><span>新建项目</span></button>
-          <button className={activeView === 'workspace' ? 'is-active' : ''} onClick={onWorkspace}><Folder size={17} /><span>工作台</span></button>
-          <button className={activeView === 'artifacts' ? 'is-active' : ''} onClick={onArtifacts}><Files size={17} /><span>生成文件</span></button>
-          <button className={activeView === 'settings' ? 'is-active' : ''} onClick={onSettings}><Settings size={17} /><span>设置</span></button>
-        </nav>
-        <div className="session-section">
-          <div className="section-label"><span>项目</span><span>{sessions.length}</span></div>
-          <div className="session-list">
-            {sessions.map((session) => (
-              <div
-                key={session.sessionId}
-                className={`session-item ${session.sessionId === selectedSessionId ? 'is-selected' : ''}`}
-              >
-                <button className="session-open" onClick={() => onSelect(session.sessionId)}>
-                  <span className="session-copy">
-                    <strong>{sessionTitle(session)}</strong>
-                    <small>{relativeTime(session.updatedAt)} · {stageLabel(session.stage)}</small>
-                  </span>
-                </button>
-                <button className="session-delete" onClick={() => onDelete(session)} aria-label={`删除 ${sessionTitle(session)}`} title="删除项目">
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))}
-            {sessions.length === 0 && <span className="empty-list">暂无项目</span>}
-          </div>
-        </div>
-        <div className="sidebar-footer">
-          <span className="avatar">V</span>
-          <div><strong>本地工作台</strong><small>本地 · ViMax</small></div>
-        </div>
-      </aside>
-    </>
-  );
-}
+const CONFIG_SECTIONS: Array<{key: 'llm'; title: string; description: string}> = [
+  {key: 'llm', title: '创作语言模型', description: '用于母本分析、人物设置、群聊编写和检查'},
+];
 
-function EmptyState({theme}: {theme: Theme}) {
-  return (
-    <section className="empty-state">
-      <img className="empty-state-logo" src={theme === 'dark' ? '/vimax-light.svg' : '/vimax-dark.svg'} alt="ViMax" />
-      <h1>想创作什么？</h1>
-    </section>
-  );
+function stageLabel(stage: string) {
+  const labels: Record<string, string> = {created: '已创建', running: '生成中', paused: '已暂停', completed: '已完成', failed: '失败', early_end: '已结束'};
+  return labels[stage] || stage || '已创建';
 }
 
 function ThemeToggle({theme, onToggle}: {theme: Theme; onToggle: () => void}) {
@@ -606,94 +135,6 @@ function ThemeToggle({theme, onToggle}: {theme: Theme; onToggle: () => void}) {
     </button>
   );
 }
-
-function MessageRow({message}: {message: Message}) {
-  if (message.role === 'activity') return <ActivityRow message={message} />;
-  return (
-    <article className={`message-row role-${message.role}`}>
-      <div className="message-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={{a: (props) => <a {...props} target="_blank" rel="noreferrer" />}}>
-          {message.text}
-        </ReactMarkdown>
-      </div>
-    </article>
-  );
-}
-
-function ActivityRow({message}: {message: Message}) {
-  const stage = message.stage ? humanize(message.stage) : '';
-  const detail = stage.toLowerCase() === message.text.toLowerCase() ? message.text : [stage, message.text].filter(Boolean).join(' · ');
-  const toolKind = activityToolKind(message.tool);
-  return (
-    <div className={`activity-row status-${message.status || 'done'}`}>
-      <span className={`activity-indicator tool-${toolKind}`}><ActivityToolIcon tool={message.tool} /></span>
-      <div>
-        <strong>{humanize(message.tool || '生成流程')}</strong>
-        <span>{detail}</span>
-      </div>
-    </div>
-  );
-}
-
-function ActivityToolIcon({tool}: {tool?: string}) {
-  const name = (tool || '').toLowerCase();
-  const props = {size: 13, strokeWidth: 1.8};
-  if (name.includes('narrative_planning') || name.includes('novel_planning')) return <FilePenLine {...props} />;
-  if (name.includes('render_video')) return <Film {...props} />;
-  if (name === 'view_image' || name.includes('image')) return <ImageIcon {...props} />;
-  if (name === 'read_json' || name === 'write_json') return <Braces {...props} />;
-  if (name === 'read_file' || name === 'write_file') return <FileText {...props} />;
-  if (name === 'list_files' || name === 'glob_files') return <Folder {...props} />;
-  if (name === 'search_text') return <Search {...props} />;
-  if (name.startsWith('memory_')) return <Brain {...props} />;
-  if (name.startsWith('todo_')) return <ListChecks {...props} />;
-  if (name === 'run_shell') return <Terminal {...props} />;
-  if (name === 'sleep') return <Clock3 {...props} />;
-  return <Wrench {...props} />;
-}
-
-function activityToolKind(tool?: string) {
-  const name = (tool || '').toLowerCase();
-  if (name.includes('narrative_planning') || name.includes('novel_planning')) return 'planning';
-  if (name.includes('render_video')) return 'render';
-  if (name === 'view_image' || name.includes('image')) return 'image';
-  if (name.startsWith('memory_')) return 'memory';
-  if (name.startsWith('todo_')) return 'todo';
-  if (name === 'run_shell') return 'shell';
-  if (name === 'sleep') return 'time';
-  return 'file';
-}
-
-function ThinkingRow({messages}: {messages: Message[]}) {
-  const running = [...messages].reverse().find((message) => message.role === 'activity' && message.status === 'running');
-  return (
-    <div className="thinking-row">
-      <span className="thinking-mark"><i /><i /><i /></span>
-      <span>{running ? `${humanize(running.tool || 'ViMax')} · ${running.text}` : 'ViMax 正在思考'}</span>
-    </div>
-  );
-}
-
-function SlashCommandMenu({matches, contextPercent, onSelect}: {matches: SlashCommandMatch[]; contextPercent: number; onSelect: (command: string) => void}) {
-  return (
-    <div className="slash-command-menu" role="listbox" aria-label="快捷命令">
-      {matches.length > 0 ? matches.map((command) => (
-        <button key={command.name} role="option" aria-selected="false" onMouseDown={(event) => event.preventDefault()} onClick={() => onSelect(command.name)}>
-          <code><span><b>{command.matchedPrefix}</b><span>{command.unmatchedSuffix}</span></span>{command.name === '/compact' && <em>{contextPercent}%</em>}</code>
-          <small>{command.description}</small>
-        </button>
-      )) : <span className="slash-command-empty">没有匹配的命令</span>}
-    </div>
-  );
-}
-
-const CONFIG_SECTIONS: Array<{key: keyof AgentConfig['sections']; title: string; description: string}> = [
-  {key: 'llm', title: '创作语言模型', description: '负责规划、选择生成工具与交流'},
-  {key: 'image', title: '图片生成', description: '生成人物形象、关键帧和镜头画面'},
-  {key: 'video', title: '视频生成', description: '生成镜头片段并合成视频'},
-  {key: 'embedding', title: '向量模型', description: '用于小说内容检索，可选'},
-  {key: 'reranker', title: '重排序模型', description: '优化小说检索结果，可选'},
-];
 
 function SettingsView() {
   const [config, setConfig] = useState<AgentConfig>();
@@ -725,7 +166,7 @@ function SettingsView() {
     setSaving(true);
     setStatus('');
     try {
-      setConfig(await saveAgentConfig(config));
+      setConfig(await saveAgentConfig({sections: {llm: config.sections.llm}}));
       setStatus('已保存');
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -782,112 +223,6 @@ function ConfigSectionEditor({definition, value, onChange}: {
       </div>
     </section>
   );
-}
-
-function DeleteProjectDialog({session, deleting, onCancel, onConfirm}: {
-  session?: SessionSummary;
-  deleting: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  useEffect(() => {
-    if (!session) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !deleting) onCancel();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [deleting, onCancel, session]);
-
-  if (!session) return null;
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onCancel()}>
-      <section className="delete-dialog" role="dialog" aria-modal="true" aria-labelledby="delete-project-title">
-        <span className="dialog-icon"><Trash2 size={18} /></span>
-        <div className="dialog-copy">
-          <h2 id="delete-project-title">删除项目？</h2>
-          <p><strong>{sessionTitle(session)}</strong>及其生成文件将被删除。</p>
-        </div>
-        <div className="dialog-actions">
-          <button onClick={onCancel} disabled={deleting} autoFocus>取消</button>
-          <button className="danger" onClick={onConfirm} disabled={deleting}>{deleting ? '正在删除…' : '删除'}</button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function NewProjectDialog({open, name, error, creating, onNameChange, onCancel, onConfirm}: {
-  open: boolean;
-  name: string;
-  error: string;
-  creating: boolean;
-  onNameChange: (value: string) => void;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !creating) onCancel();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [creating, onCancel, open]);
-
-  if (!open) return null;
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onCancel()}>
-      <form className="project-dialog" role="dialog" aria-modal="true" aria-labelledby="new-project-title" onSubmit={(event) => {
-        event.preventDefault();
-        onConfirm();
-      }}>
-        <span className="dialog-icon is-create"><FolderPlus size={18} /></span>
-        <div className="dialog-copy">
-          <h2 id="new-project-title">新建项目</h2>
-          <p>先为项目起一个名字。</p>
-        </div>
-        <label className="project-name-field">
-          <span>项目名称</span>
-          <input
-            value={name}
-            onChange={(event) => onNameChange(event.target.value)}
-            placeholder="未命名项目"
-            maxLength={64}
-            autoFocus
-            disabled={creating}
-          />
-          {error && <small role="alert">{error}</small>}
-        </label>
-        <div className="dialog-actions">
-          <button type="button" onClick={onCancel} disabled={creating}>取消</button>
-          <button type="submit" className="primary" disabled={creating || !name.trim()}>{creating ? '正在创建…' : '创建'}</button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function sessionTitle(session?: SessionSummary) {
-  if (!session) return '新项目';
-  if (session.projectName) return session.projectName;
-  const source = session.idea || session.summary;
-  if (source) return source.length > 38 ? `${source.slice(0, 38).trim()}…` : source;
-  return session.sessionId.replace(/^\d{8}-\d{6}-?/, '') || '未命名项目';
-}
-
-function stageLabel(stage: string) {
-  const labels: Record<string, string> = {
-    created: '已创建',
-    narrative_planning: '正在规划',
-    narrative_planned: '规划已完成',
-    novel_planning: '正在规划小说',
-    novel_planned: '小说规划已完成',
-    rendering: '正在生成',
-    rendered: '生成已完成',
-    error: '需要处理',
-  };
-  return labels[stage] || humanize(stage || '已创建');
 }
 
 function relativeTime(value: string) {
