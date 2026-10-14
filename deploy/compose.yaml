@@ -27,8 +27,12 @@ services:
       dockerfile: deploy/Dockerfile.web
     image: vimax-dialogue-web:${VIMAX_RELEASE:-local}
     restart: unless-stopped
+    env_file:
+      - ${VIMAX_SHARED_DIR:-../.vimax/server}/access.env
     environment:
       VIMAX_DIALOGUE_URL: http://backend:9014
+      VIMAX_AUTH_REQUIRED: "1"
+      VIMAX_AUTH_SECURE_COOKIE: "1"
     volumes:
       - ${VIMAX_SHARED_DIR:-../.vimax/server}/state:/app/.vimax
       - ${VIMAX_SHARED_DIR:-../.vimax/server}/configs:/app/configs
@@ -38,8 +42,6 @@ services:
   gateway:
     image: caddy:2-alpine
     restart: unless-stopped
-    env_file:
-      - ${VIMAX_SHARED_DIR:-../.vimax/server}/access.env
     ports:
       - ${VIMAX_BIND_ADDR:-127.0.0.1}:${VIMAX_PUBLIC_PORT:-18081}:8080
     volumes:

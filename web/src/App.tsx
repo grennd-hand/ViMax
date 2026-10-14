@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useState} from 'react';
-import {Files, FolderPlus, Menu, Moon, PanelLeftClose, PanelLeftOpen, Save, Settings, Sun, X} from 'lucide-react';
+import {Files, FolderPlus, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Save, Settings, Sun, X} from 'lucide-react';
 import {getAgentConfig, getSessions, saveAgentConfig} from './api';
 import DialogueWorkspace from './DialogueWorkspace';
 import './dialogue.css';
@@ -8,7 +8,7 @@ import type {AgentConfig, ConfigSection, SessionSummary} from './types';
 
 type WorkspaceView = 'dialogue' | 'settings';
 
-export default function App() {
+export default function App({account, onLogout}: {account?: string; onLogout?: () => Promise<void>}) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [dialogueRunId, setDialogueRunId] = useState(new URLSearchParams(location.search).get('run') || '');
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('dialogue');
@@ -91,7 +91,7 @@ export default function App() {
           {!sessions.length && <span className="empty-list">暂无剧本</span>}
         </div>
       </div>
-      <div className="sidebar-footer"><span className="avatar">V</span><div><strong>群聊创作工作台</strong><small>本地 · ViMax</small></div></div>
+      <div className="sidebar-footer"><span className="avatar">V</span><div><strong>群聊创作工作台</strong><small>{account ? `已登录 · ${account}` : '本地 · ViMax'}</small></div></div>
     </aside>
     <main className="workspace-main">
       <header className="workspace-header">
@@ -100,7 +100,9 @@ export default function App() {
           {!sidebarOpen && <button className="icon-button desktop-only" onClick={() => setSidebarOpen(true)} aria-label="展开导航"><PanelLeftOpen size={18} /></button>}
           <strong>{workspaceView === 'settings' ? '模型设置' : '群聊剧本'}</strong>
         </div>
-        <ThemeToggle theme={theme} onToggle={() => setTheme(theme === 'dark' ? 'light' : 'dark')} />
+        <div style={{display: 'flex', gap: 10}}><ThemeToggle theme={theme} onToggle={() => setTheme(theme === 'dark' ? 'light' : 'dark')} />
+          {onLogout && <button className="icon-button" aria-label="退出登录" title="退出登录" onClick={() => void onLogout().catch(error => setLoadError(String(error.message || error)))}><LogOut size={18} /></button>}
+        </div>
       </header>
       {loadError && <div className="load-error" role="alert">{loadError}<button onClick={() => setLoadError('')} aria-label="关闭错误提示"><X size={15} /></button></div>}
       <div key={projectVersion} style={{display: workspaceView === 'dialogue' ? undefined : 'none', flex: 1, minHeight: 0, overflow: 'auto'}}>

@@ -1,10 +1,12 @@
 # ViMax 公网工作台部署
 
-此部署使用独立的后台、工作台和访问网关容器。后台不发布主机端口，前端同源代理后台请求；公开入口统一要求独立登录。网关支持上传和不缓冲的进度流。模型密钥保存在服务器共享目录的私有配置中，读取设置接口只返回是否配置，不返回原密钥。
+此部署使用独立的后台、工作台和访问网关容器。后台不发布主机端口，前端同源代理后台请求；公开入口使用中文登录页面。认证在工作台服务执行，所有业务接口、剧本数据和导出均要求有效会话。网关支持上传和不缓冲的进度流。模型密钥保存在服务器共享目录的私有配置中，读取设置接口只返回是否配置，不返回原密钥。
 
 先执行 `npm ci` 和 `npm run build`（工作目录 `web`），再准备发布源代码包。不要打包 `.env`、本地模型密钥、全部历史数据或虚拟环境。根据需要单独备份或迁移已授权的剧本数据。
 
-部署环境设置 `VIMAX_RELEASE`、`VIMAX_SHARED_DIR`、`VIMAX_BIND_ADDR` 和 `VIMAX_PUBLIC_PORT`。共享目录包含 `configs/agent.local.yaml`、`state/` 和 `access.env`。后者设置 `VIMAX_ACCESS_USER`、`VIMAX_ACCESS_HASH`，bcrypt值应以单引号包裹，防止环境文件把美元符号当变量。所有私有配置设为仅管理员可读。
+部署环境设置 `VIMAX_RELEASE`、`VIMAX_SHARED_DIR`、`VIMAX_BIND_ADDR` 和 `VIMAX_PUBLIC_PORT`。共享目录包含 `configs/agent.local.yaml`、`state/` 和 `access.env`。后者设置 `VIMAX_ACCESS_USER`、`VIMAX_AUTH_PASSWORD_HASH`，密码哈希格式为 `saltHex:hashHex`，采用 Node.js `scrypt` 默认参数、16 字节随机盐和 64 字节结果。所有私有配置设为仅管理员可读。Compose 强制认证，缺少私有配置时启动失败；本地不设置 `VIMAX_AUTH_REQUIRED=1` 时延续原本的本地访问方式。
+
+公网必须使用 HTTPS；Compose 设置安全 Cookie，只能通过 HTTPS 保持登录。会话 Cookie 为 `HttpOnly`、`Secure`、`SameSite=Strict`，有效期为 12 小时，退出会撤销会话。会话存于服务内存，服务重启后需要重新登录。未登录的首页跳转登录页，业务接口返回 401，不发送 `WWW-Authenticate`，因此不触发浏览器认证弹窗。账号密码保持独立于 SSH 账号，原 bcrypt 配置可保留供上一发布版本回滚使用。
 
 候选环境默认仅监听 `127.0.0.1:18081`。执行 `docker compose -p vimax-dialogue --env-file release.env -f deploy/compose.yaml build`，随后 `up -d`。检查后台健康、登录保护、模型配置、人格库、进度流和导出后，再切换目标公网端口。
 

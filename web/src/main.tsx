@@ -1,5 +1,5 @@
 import {createRoot} from 'react-dom/client';
-import App from './App';
+import AuthGate from './AuthGate';
 import './styles.css';
 import {applyTheme, resolveTheme, THEME_STORAGE_KEY} from './theme';
 
@@ -11,4 +11,4 @@ try {
 }
 applyTheme(resolveTheme(storedTheme, window.matchMedia('(prefers-color-scheme: dark)').matches));
 
-createRoot(document.getElementById('root')!).render(<App />);
+createRoot(document.getElementById('root')!).render(<AuthGate />);

@@ -1,7 +1,4 @@
 :8080 {
-    basic_auth {
-        {$VIMAX_ACCESS_USER} {$VIMAX_ACCESS_HASH}
-    }
     request_body {
         max_size 100MB
     }
