@@ -6,9 +6,8 @@ const lifetime = 12 * 60 * 60 * 1000;
 
 export function createAuthentication(env = process.env, now = Date.now) {
   const required = env.VIMAX_AUTH_REQUIRED === '1';
-  const username = env.VIMAX_ACCESS_USER || '';
   const [salt, encoded] = (env.VIMAX_AUTH_PASSWORD_HASH || '').split(':');
-  if (required && (!username || !/^[a-f0-9]{32}$/.test(salt || '') || !/^[a-f0-9]{128}$/.test(encoded || ''))) {
+  if (required && (!/^[a-f0-9]{32}$/.test(salt || '') || !/^[a-f0-9]{128}$/.test(encoded || ''))) {
     throw new Error('Authentication is required but its private configuration is missing or invalid');
   }
   const sessions = new Map();
@@ -41,7 +40,7 @@ export function createAuthentication(env = process.env, now = Date.now) {
   return {
     async handle(request, response, url) {
       if (url.pathname === '/auth/session' && request.method === 'GET') {
-        json(response, 200, {required, authenticated: authenticated(request), username: authenticated(request) && required ? username : ''});
+        json(response, 200, {required, authenticated: authenticated(request)});
         return true;
       }
       if (!required) return false;
@@ -68,13 +67,13 @@ export function createAuthentication(env = process.env, now = Date.now) {
             chunks.push(chunk);
           }
           body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (!body || typeof body.username !== 'string' || typeof body.password !== 'string' || body.password.length > 1024) throw new Error();
-        } catch { json(response, 400, {error: '请填写账号和密码。'}); return true; }
+          if (!body || typeof body.accessKey !== 'string' || !body.accessKey || body.accessKey.length > 1024) throw new Error();
+        } catch { json(response, 400, {error: '请填写访问密钥。'}); return true; }
         // Count pending attempts too, so parallel requests cannot bypass the limit.
         current.count += 1; attempts.set(peer, current);
-        const actual = await derive(body.password, Buffer.from(salt, 'hex'), 64);
-        if (!timingSafeEqual(actual, Buffer.from(encoded, 'hex')) || body.username !== username) {
-          json(response, 401, {error: '账号或密码不正确，请重新输入。'}); return true;
+        const actual = await derive(body.accessKey, Buffer.from(salt, 'hex'), 64);
+        if (!timingSafeEqual(actual, Buffer.from(encoded, 'hex'))) {
+          json(response, 401, {error: '访问密钥不正确，请重新输入。'}); return true;
         }
         for (const [key, expires] of sessions) if (expires <= now()) sessions.delete(key);
         if (sessions.size >= 1000) { json(response, 503, {error: '当前登录人数过多，请稍后再试。'}); return true; }

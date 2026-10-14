@@ -1,12 +1,12 @@
 # ViMax 公网工作台部署
 
-此部署使用独立的后台、工作台和访问网关容器。后台不发布主机端口，前端同源代理后台请求；公开入口使用中文登录页面。认证在工作台服务执行，所有业务接口、剧本数据和导出均要求有效会话。网关支持上传和不缓冲的进度流。模型密钥保存在服务器共享目录的私有配置中，读取设置接口只返回是否配置，不返回原密钥。
+此部署使用独立的后台、工作台和访问网关容器。后台不发布主机端口，前端同源代理后台请求；公开入口使用中文密钥登录页面。认证在工作台服务执行，所有业务接口、剧本数据和导出均要求有效会话。网关支持上传和不缓冲的进度流。模型密钥保存在服务器共享目录的私有配置中，读取设置接口只返回是否配置，不返回原密钥。
 
 先执行 `npm ci` 和 `npm run build`（工作目录 `web`），再准备发布源代码包。不要打包 `.env`、本地模型密钥、全部历史数据或虚拟环境。根据需要单独备份或迁移已授权的剧本数据。
 
-部署环境设置 `VIMAX_RELEASE`、`VIMAX_SHARED_DIR`、`VIMAX_BIND_ADDR` 和 `VIMAX_PUBLIC_PORT`。共享目录包含 `configs/agent.local.yaml`、`state/` 和 `access.env`。后者设置 `VIMAX_ACCESS_USER`、`VIMAX_AUTH_PASSWORD_HASH`，密码哈希格式为 `saltHex:hashHex`，采用 Node.js `scrypt` 默认参数、16 字节随机盐和 64 字节结果。所有私有配置设为仅管理员可读。Compose 强制认证，缺少私有配置时启动失败；本地不设置 `VIMAX_AUTH_REQUIRED=1` 时延续原本的本地访问方式。
+部署环境设置 `VIMAX_RELEASE`、`VIMAX_SHARED_DIR`、`VIMAX_BIND_ADDR` 和 `VIMAX_PUBLIC_PORT`。共享目录包含 `configs/agent.local.yaml`、`state/` 和 `access.env`。后者设置 `VIMAX_AUTH_PASSWORD_HASH`，访问密钥哈希格式为 `saltHex:hashHex`，采用 Node.js `scrypt` 默认参数、16 字节随机盐和 64 字节结果。所有私有配置设为仅管理员可读。Compose 强制认证，缺少私有配置时启动失败；本地不设置 `VIMAX_AUTH_REQUIRED=1` 时延续原本的本地访问方式。
 
-公网必须使用 HTTPS；Compose 设置安全 Cookie，只能通过 HTTPS 保持登录。会话 Cookie 为 `HttpOnly`、`Secure`、`SameSite=Strict`，有效期为 12 小时，退出会撤销会话。会话存于服务内存，服务重启后需要重新登录。未登录的首页跳转登录页，业务接口返回 401，不发送 `WWW-Authenticate`，因此不触发浏览器认证弹窗。账号密码保持独立于 SSH 账号，原 bcrypt 配置可保留供上一发布版本回滚使用。
+公网必须使用 HTTPS；Compose 设置安全 Cookie，只能通过 HTTPS 保持登录。会话 Cookie 为 `HttpOnly`、`Secure`、`SameSite=Strict`，有效期为 12 小时，退出会撤销会话。会话存于服务内存，服务重启后需要重新登录。未登录的首页跳转登录页，业务接口返回 401，不发送 `WWW-Authenticate`，因此不触发浏览器认证弹窗。访问密钥保持独立于 SSH 口令，不使用模型 API 密钥，原 bcrypt 配置可保留供上一发布版本回滚使用。
 
 候选环境默认仅监听 `127.0.0.1:18081`。执行 `docker compose -p vimax-dialogue --env-file release.env -f deploy/compose.yaml build`，随后 `up -d`。检查后台健康、登录保护、模型配置、人格库、进度流和导出后，再切换目标公网端口。
 
@@ -16,7 +16,7 @@
 
 ## 2026-10-14 发布记录
 
-公网入口：https://script-variant-studio.217.194.133.194.sslip.io 。沿用服务器现有 HTTPS 代理，转发至 ViMax 网关的 18080 端口。公网直接访问 IP 的 18080 端口未通过验证，应使用上述 HTTPS 地址。工作台账号为 `vimax`，密码通过独立渠道交付，不进入仓库。
+公网入口：https://script-variant-studio.217.194.133.194.sslip.io 。沿用服务器现有 HTTPS 代理，转发至 ViMax 网关的 18080 端口。公网直接访问 IP 的 18080 端口未通过验证，应使用上述 HTTPS 地址。初次部署使用独立账号和密码，后续密钥登录保留访问密钥，通过独立渠道交付，不进入仓库。
 
 应用代码基于 `51c8f9a318937c4c5b6b8c982341bbde68d2cbd9`，发布目录为 `/opt/vimax/releases/20261014-51c8f9a`，`/opt/vimax/current` 指向此目录。Compose 项目名为 `vimax-dialogue`，共享配置和数据保存在 `/opt/vimax/shared`。运行模型为 `gpt-6-sol`，推理强度为 `high`。
 

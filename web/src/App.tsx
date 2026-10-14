@@ -8,7 +8,7 @@ import type {AgentConfig, ConfigSection, SessionSummary} from './types';
 
 type WorkspaceView = 'dialogue' | 'settings';
 
-export default function App({account, onLogout}: {account?: string; onLogout?: () => Promise<void>}) {
+export default function App({authenticated, onLogout}: {authenticated?: boolean; onLogout?: () => Promise<void>}) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [dialogueRunId, setDialogueRunId] = useState(new URLSearchParams(location.search).get('run') || '');
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('dialogue');
@@ -91,7 +91,7 @@ export default function App({account, onLogout}: {account?: string; onLogout?: (
           {!sessions.length && <span className="empty-list">暂无剧本</span>}
         </div>
       </div>
-      <div className="sidebar-footer"><span className="avatar">V</span><div><strong>群聊创作工作台</strong><small>{account ? `已登录 · ${account}` : '本地 · ViMax'}</small></div></div>
+      <div className="sidebar-footer"><span className="avatar">V</span><div><strong>群聊创作工作台</strong><small>{authenticated ? '访问密钥已验证' : '本地 · ViMax'}</small></div></div>
     </aside>
     <main className="workspace-main">
       <header className="workspace-header">

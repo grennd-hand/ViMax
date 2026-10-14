@@ -4,7 +4,7 @@ import App from './App';
 import {applyTheme, resolveTheme, THEME_STORAGE_KEY, type Theme} from './theme';
 import './login.css';
 
-type Session = {required: boolean; authenticated: boolean; username: string};
+type Session = {required: boolean; authenticated: boolean};
 
 function nextPath() {
   const value = new URLSearchParams(location.search).get('next') || '/';
@@ -63,12 +63,11 @@ export default function AuthGate() {
 
   if (!session) return <div className="login-loading" role="status"><strong>ViMax</strong><span>{error || '正在连接工作台…'}</span>{error && <button onClick={() => {setError(''); setVersion(value => value + 1);}}>重新连接</button>}</div>;
   if (!session.authenticated) return <LoginPage onLogin={loggedIn} />;
-  return <App account={session.required ? session.username : undefined} onLogout={session.required ? logout : undefined} />;
+  return <App authenticated={session.required} onLogout={session.required ? logout : undefined} />;
 }
 
 function LoginPage({onLogin}: {onLogin: () => Promise<void>}) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
+  const [accessKey, setAccessKey] = useState('');
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -83,7 +82,7 @@ function LoginPage({onLogin}: {onLogin: () => Promise<void>}) {
     if (busy) return;
     setBusy(true); setError('');
     try {
-      const response = await fetch('/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({username: username.trim(), password})});
+      const response = await fetch('/auth/login', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accessKey})});
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || '登录未完成，请重试。');
       await onLogin();
@@ -112,10 +111,9 @@ function LoginPage({onLogin}: {onLogin: () => Promise<void>}) {
         <div className="login-mobile-brand"><MessageSquare size={24} /><strong>ViMax</strong></div>
         <span className="login-welcome">继续你的创作</span>
         <h2 id="login-title">欢迎回来</h2>
-        <p className="login-description">登录 ViMax，打开你的群聊剧本工作台。</p>
+        <p className="login-description">输入访问密钥，打开你的群聊剧本工作台。</p>
         <form onSubmit={submit} className="login-form">
-          <div className="login-field"><label htmlFor="login-username">账号</label><input id="login-username" name="username" autoComplete="username" placeholder="请输入账号" required maxLength={128} value={username} onChange={event => setUsername(event.target.value)} disabled={busy} autoCapitalize="none" spellCheck={false} /></div>
-          <div className="login-field"><label htmlFor="login-password">密码</label><div className="login-password"><input id="login-password" name="password" type={visible ? 'text' : 'password'} autoComplete="current-password" placeholder="请输入密码" required maxLength={1024} value={password} onChange={event => setPassword(event.target.value)} disabled={busy} aria-describedby={error ? 'login-error' : undefined} /><button type="button" aria-label={visible ? '隐藏密码' : '显示密码'} aria-pressed={visible} onClick={() => setVisible(value => !value)}>{visible ? <EyeOff size={19} /> : <Eye size={19} />}</button></div></div>
+          <div className="login-field"><label htmlFor="login-password">访问密钥</label><div className="login-password"><input id="login-password" name="accessKey" type={visible ? 'text' : 'password'} autoComplete="current-password" placeholder="请输入访问密钥" required maxLength={1024} value={accessKey} onChange={event => setAccessKey(event.target.value)} disabled={busy} aria-describedby={error ? 'login-error' : undefined} /><button type="button" aria-label={visible ? '隐藏密钥' : '显示密钥'} aria-pressed={visible} onClick={() => setVisible(value => !value)}>{visible ? <EyeOff size={19} /> : <Eye size={19} />}</button></div></div>
           <div className="login-feedback" aria-live="polite">{error && <p id="login-error" role="alert">{error}</p>}</div>
           <button className="login-submit" type="submit" disabled={busy}>{busy ? '正在登录…' : '进入工作台'}{busy ? <span className="login-spinner" /> : <ArrowRight size={18} />}</button>
           <p className="login-session-note"><LockKeyhole size={14} />登录状态保留 12 小时，可随时退出。</p>
