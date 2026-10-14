@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from .opening import opening_requirement
@@ -25,12 +26,39 @@ class DialogueEvent(module.Event):
 
 class DialoguePlan(BaseModel):
     events: list[DialogueEvent] = Field(min_length=1, max_length=18)
+    threads: list['ConversationThread'] = Field(default_factory=list, max_length=8)
+    people: list['PersonSituation'] = Field(default_factory=list)
+
+
+class ConversationThread(BaseModel):
+    topic: str
+    kind: Literal['业务', '日常', '关系']
+    roles: list[str]
+    seed: str = Field(description='可引出具体交流的情境，不写预定台词或统一结论')
+
+
+class PersonSituation(BaseModel):
+    role: str
+    personal_now: str = Field(description='本人眼前的小事，别人只有听他说出后才知道')
+    cares_about: str
+    may_ignore: str = Field(description='哪些与自己无关的消息可以不接')
+
+
+DialoguePlan.model_rebuild()
 
 
 def planning_requirement(run: dict) -> str:
     policy = run['config'].get('opening_policy')
+    legacy = policy and policy.get('version', 1) == 1
     boundaries = (f"寒暄暖场必须为独立事件并结束于第{policy['warm_end']}条，"
-                  f"了解群用途必须为独立事件并结束于第{policy['orientation_end']}条；后续事件才进入正题。" if policy else '')
+                  f"了解群用途必须为独立事件并结束于第{policy['orientation_end']}条。" if legacy else
+                  '事件区间仅为篇幅参考，允许话题交错，不按区间轮流考核步骤。'
+                  '同时返回threads与people：为长篇准备业务之外的具体日常话题和每个人自己的当下处境，'
+                  '不设一个主角让其余人陪练，不预定所有人的最终立场，动作完成位置不限。'
+                  '日常话题要能产生实质内容，如具体吃饭选择、工作中的小窘事、手机使用习惯；'
+                  '不能只有忙、没空、按自己的节奏等空泛态度；这些不是新的活动。'
+                  '关系话题应是某两个人因具体交流产生的熟悉、误会或兴趣，'
+                  '不要把先问清再动手、不参加也能聊天、不跟风等制作原则设成整段话题。')
     return (
         '\n' + opening_requirement(run) + boundaries +
         '\n借用ViMax小说事件规划的完整因果链，将每个不同交流事件写成起因、过程、结果，并保留跨事件人物连续性。'
@@ -68,8 +96,15 @@ def parse_plan(text: str, run: dict) -> list[dict]:
     if expected != run['config']['target_messages'] + 1:
         raise ValueError('事件规划未覆盖所需消息总数')
     policy = run['config'].get('opening_policy')
-    if policy:
+    if policy and policy.get('version', 1) == 1:
         ends = {event.message_end for event in plan.events}
         if not {policy['warm_end'], policy['orientation_end']} <= ends:
             raise ValueError('事件规划需将寒暄暖场、了解群用途与正题分开，保持规定的开场区间')
+    if run['config'].get('dialogue_flow_version', 1) >= 2:
+        if not plan.threads or len(plan.people) != len(roles) or {p.role for p in plan.people} != roles:
+            raise ValueError('续写规划需包含交流话题和每个人的当下处境')
+        if any(not set(thread.roles) <= roles for thread in plan.threads):
+            raise ValueError('交流话题使用了未设置的人物')
+        run['conversation_threads'] = [t.model_dump() for t in plan.threads]
+        run['person_situations'] = {p.role: p.model_dump() for p in plan.people}
     return [event.model_dump() for event in plan.events]

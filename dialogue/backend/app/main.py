@@ -26,6 +26,7 @@ from .dialogue_quality import closes_group, style_findings
 from .locale import language_context, message_char_limit, normalize_language
 from .persona_library import default_cards, default_entries, persona_library
 from .opening import opening_policy, opening_requirement, opening_schedule
+from .conversation_flow import naturalness_evidence
 from .persona_memory import record_public_memory
 from .memory_store import SQLiteMemoryStore, bind_characters, init_memory_schema, normalize_reflections, reflection_due, sync_accepted_memory
 from .memory_cognition import prepare_memory_context
@@ -555,6 +556,7 @@ async def start_simulation(config: SimulationConfig) -> dict:
         raise HTTPException(422, str(exc)) from exc
     normalized_config = config.model_dump()
     normalized_config['opening_policy'] = opening_policy(config.target_messages)
+    normalized_config['dialogue_flow_version'] = 2
     schedule = opening_schedule(schedule, normalized_config['opening_policy'])
     normalized_config["reasoning_effort"] = model_reasoning_effort(normalized_config)
     roles = ["坐席"] + template["source"]["accounts"] + [f"客户{i + 1}" for i in range(config.customer_count)]
@@ -744,7 +746,7 @@ STAGE_FOCUS = {
 
 async def review_dialogue(template: dict, run: dict) -> dict:
     result = await model_json(
-        "审阅一份模拟群聊的对话逻辑。只检查明显的说话人身份错乱、答非所问、前后矛盾、严重重复、步骤在解释前就被当作完成、"
+        "审阅一份模拟群聊的对话逻辑与群聊读感。检查说话人身份错乱、答非所问、前后矛盾、严重重复、步骤在解释前就被当作完成、"
         "客户尚未明确退出却被当作退出，以及必要因果关系被颠倒（如入口公布前已打开、点赞前已截图）。一个具体问题在坐席回答后，若后续三条以上只是不同人重复确认同一答案，"
         "也必须标出开始原地打转的消息；除非出现新的事实或新的疑问。多个角色接连附加相同的假设性提醒、没有推进实际状态，也要指出。"
         "固定代码由坐席提供，若对话声称页面生成或显示该代码，也要指出。"
@@ -756,7 +758,13 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "还要按 output_language 检查长对话里不同角色是否反复共用同一种汇报句式，是否连续把每句话写成‘已完成、下一步、等待确认’，"
         "以及是否多人轮流重复同一未知条件或风险提醒；保留必要提醒，但不要让它占据整段对话。"
         "以及角色口吻是否逐渐混成同一个人。style_findings 是带原句的候选证据，须结合上下文判断；确实有不同观察或自然回应时不要误报。"
-        "opening_contract规定开场先打招呼和日常接话，再由参与者询问群用途、坐席回应，最后进入正题。"
+        "opening_contract规定寒暄再了解群用途，转场由实际交流产生，不固定条号。"
+        "对新版rolling_conversation检查安排感：多个群友逐项见证同一个人操作、把动作拆成准备做正在做已做、"
+        "角色反复解释自主性或互相称赞理性、已经解决的问题无新背景又重问，都应引用具体台词标出。"
+        "日常生活同样检查连续性：选了热饭不能未交代就改成煮面或干拌，已经端回座位不能又在原处等着端回；"
+        "收拾完的东西不能又变成没收拾。区分短暂回忆与当前动作，后续变化须有公开依据。"
+        "日常话题可以与业务交错，人物可以不接话或漏看，不必每句推进任务；任务完成后继续其他话题合法。"
+        "不得把原值改掉、伪造外部到账来换取自然；也不能只靠加口头禅或无意义短句凑数。"
         "检查是否第一条就宣讲目的、没有暖场直接操作、所有人轮流报到，或在坐席解释后仍反复问群用途。"
         "正常寒暄、玩笑和人物相互熟悉属于有效交流，不因没有业务动作而报错；不强迫所有人都开口。"
         "public_decisions 是带原话的个人选择。区分活动时段与个人准备时间等不同事项；同一事项前后改变须有具体原因。"
@@ -780,6 +788,8 @@ async def review_dialogue(template: dict, run: dict) -> dict:
          "public_decisions": decision_ledger(run),
          "completion_actions": template["analysis"].get("completion_actions"),
          "persona_cards": run["config"].get("persona_cards", {}),
+         "rolling_conversation": run["config"].get("dialogue_flow_version", 1) >= 2,
+         "naturalness_evidence": naturalness_evidence(run["messages"]),
          "memory_enabled": bool(run["config"].get("memory_enabled") and run.get("character_bindings")),
          "source_seat_evidence": [{"source_row": m["source_row"], "content": str(m["content"])[:240]}
                                   for m in template["source"]["messages"]

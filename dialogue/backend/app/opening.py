@@ -3,15 +3,21 @@ from __future__ import annotations
 
 
 def opening_policy(total: int) -> dict:
-    # Keep a few exchanges for short previews, and eight for a 150-message run.
-    warm_end = min(8, max(1, total // 20 + 2), max(1, total - 2))
-    orientation_end = min(total - 1, warm_end + min(4, max(1, total // 30)))
-    return {'version': 1, 'warm_end': warm_end, 'orientation_end': orientation_end,
-            'main_start': orientation_end + 1}
+    return {'version': 2, 'mode': 'conversation', 'suggested_warmup': [2, min(9, max(2, total // 10))]}
 
 
 def opening_requirement(run: dict) -> str:
     policy = run['config'].get('opening_policy') or opening_policy(run['config']['target_messages'])
+    if policy.get('version', 1) >= 2:
+        return (
+            '先打招呼、暖几句，再自然出现对群用途的疑问，坐席简短回答后进入正题。'
+            '不固定转场条号，不要求每个人报到或先声明立场。新人起初不知道群用途，'
+            '说明后不反复装作不知道；有人漏看消息可以晚点问具体一处。'
+            '日常小事可以创作，但不能变成新业务规则、共同过去或已核实的外部结果。'
+            '台词阶段依实际内容标记寒暄暖场、了解群用途、自然群聊，顺序前进；'
+            '普通闲聊进入正题后仍可继续，不能为了阶段标签硬切断话题。'
+            '入口、联系人和代码在进入正题后由坐席首次公布，暖场也计入总条数。'
+        )
     warm_end, orientation_end = policy['warm_end'], policy['orientation_end']
     return (
         f'开场必须按顺序进行：第1至{warm_end}条先寒暄暖场，第1条坐席只打招呼，'
@@ -29,7 +35,7 @@ def opening_requirement(run: dict) -> str:
 
 
 def opening_stage(seq: int, policy: dict | None) -> str:
-    if not policy:
+    if not policy or policy.get('version', 1) >= 2:
         return '自然群聊'
     if seq <= policy['warm_end']:
         return '寒暄暖场'
@@ -39,6 +45,6 @@ def opening_stage(seq: int, policy: dict | None) -> str:
 
 
 def opening_schedule(schedule: list[dict], policy: dict | None) -> list[dict]:
-    if not policy:
+    if not policy or policy.get('version', 1) >= 2:
         return schedule
     return [{**slot, 'stage': opening_stage(index + 1, policy)} for index, slot in enumerate(schedule)]

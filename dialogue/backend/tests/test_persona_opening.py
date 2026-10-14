@@ -9,11 +9,12 @@ from app.vimax_engine import contract_errors, decode_scenes, writing_contract
 
 class PersonaOpeningTests(unittest.TestCase):
     def run_fixture(self, total=30):
+        policy = {'version': 1, 'warm_end': 2 if total == 6 else 3, 'orientation_end': 3 if total == 6 else 4, 'main_start': 4 if total == 6 else 5}
         return {'config': {'target_messages': total, 'customer_count': 1, 'language': 'zh-CN',
                            'persona_cards': {'客户1': {'identity': '慢热', 'reaction_cues': '新人→少说'}},
-                           'opening_policy': opening_policy(total)},
+                           'opening_policy': policy},
                 'agent_sessions': {'坐席': {}, '客户1': {}},
-                'schedule': opening_schedule([{'stage': '自然群聊'}] * total, opening_policy(total)),
+                'schedule': opening_schedule([{'stage': '自然群聊'}] * total, policy),
                 'architecture': 'agent_team', 'status': 'completed'}
 
     def source_fixture(self):
@@ -38,12 +39,12 @@ class PersonaOpeningTests(unittest.TestCase):
         self.assertEqual(len(entries), 34)
         self.assertTrue(all('不直译中文口头禅' in e['card']['speech_habits'] for e in entries))
 
-    def test_opening_budget_preserves_room_for_main_and_close(self):
-        self.assertEqual(opening_policy(150), {'version': 1, 'warm_end': 8, 'orientation_end': 12, 'main_start': 13})
-        for total in (3, 6, 30, 150, 500):
-            p = opening_policy(total)
-            self.assertLess(p['warm_end'], p['orientation_end'])
-            self.assertLess(p['orientation_end'], total)
+    def test_new_opening_has_no_fixed_transition_numbers(self):
+        policy = opening_policy(150)
+        self.assertEqual(policy['version'], 2)
+        self.assertNotIn('warm_end', policy)
+        self.assertNotIn('orientation_end', policy)
+        self.assertEqual(opening_schedule([{'stage': '自然群聊'}], policy), [{'stage': '自然群聊'}])
 
     def test_premature_entry_is_rejected_and_regular_entry_is_allowed(self):
         run = self.run_fixture()
@@ -71,7 +72,7 @@ class PersonaOpeningTests(unittest.TestCase):
     def test_schedule_recovery_updates_opening_runs_and_preserves_old_runs(self):
         old = [{'stage': '自然群聊'}] * 6
         self.assertIs(opening_schedule(old, None), old)
-        self.assertEqual(opening_schedule(old, opening_policy(6)), self.run_fixture(6)['schedule'])
+        self.assertEqual(opening_schedule(old, self.run_fixture(6)['config']['opening_policy']), self.run_fixture(6)['schedule'])
 
     def test_zero_strength_preserves_the_cast_without_persona_cards(self):
         run = self.run_fixture(6)
