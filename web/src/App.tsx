@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from 'react';
+import {useCallback, useEffect, useRef, useState} from 'react';
 import {Files, FolderPlus, LogOut, Menu, Moon, PanelLeftClose, PanelLeftOpen, Save, Settings, Sun, X} from 'lucide-react';
 import {getAgentConfig, getSessions, saveAgentConfig} from './api';
 import DialogueWorkspace from './DialogueWorkspace';
@@ -14,10 +14,12 @@ export default function App({authenticated, onLogout}: {authenticated?: boolean;
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('dialogue');
   const [freshProject, setFreshProject] = useState(false);
   const [projectVersion, setProjectVersion] = useState(0);
+  const [selectionVersion, setSelectionVersion] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [theme, setTheme] = useState<Theme>(() => resolveTheme(document.documentElement.dataset.theme, false));
   const [loadError, setLoadError] = useState('');
+  const workspaceContent = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     applyTheme(theme);
@@ -44,6 +46,8 @@ export default function App({authenticated, onLogout}: {authenticated?: boolean;
   }, [refreshSessions]);
 
   function openProject(id: string) {
+    workspaceContent.current?.scrollTo({top: 0, behavior: 'auto'});
+    setSelectionVersion(value => value + 1);
     setDialogueRunId(id);
     setFreshProject(false);
     setWorkspaceView('dialogue');
@@ -105,8 +109,8 @@ export default function App({authenticated, onLogout}: {authenticated?: boolean;
         </div>
       </header>
       {loadError && <div className="load-error" role="alert">{loadError}<button onClick={() => setLoadError('')} aria-label="关闭错误提示"><X size={15} /></button></div>}
-      <div key={projectVersion} style={{display: workspaceView === 'dialogue' ? undefined : 'none', flex: 1, minHeight: 0, overflow: 'auto'}}>
-        <DialogueWorkspace runId={dialogueRunId} startFresh={freshProject} onRunChanged={runChanged} />
+      <div ref={workspaceContent} key={projectVersion} style={{display: workspaceView === 'dialogue' ? undefined : 'none', flex: 1, minHeight: 0, overflow: 'auto'}}>
+        <DialogueWorkspace runId={dialogueRunId} startFresh={freshProject} selectionVersion={selectionVersion} onRunChanged={runChanged} />
       </div>
       {workspaceView === 'settings' && <SettingsView />}
     </main>

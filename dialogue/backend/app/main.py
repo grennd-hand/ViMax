@@ -599,11 +599,22 @@ async def start_simulation(config: SimulationConfig) -> dict:
 
 
 @app.get("/api/simulations/{session_id}")
-def simulation_detail(session_id: str) -> dict:
+def simulation_detail(session_id: str, view: Literal["full", "workspace"] = "full") -> dict:
     run = get_run(session_id)
-    source = get_template(run["template_id"])["source"]
-    return {**run, "public_decisions": decision_ledger(run), "scene_progress": scene_ledger(run),
-            "validation": validate_run(source, run) if run["status"] in {"completed", "early_end"} else []}
+    template = get_template(run["template_id"])
+    source = template["source"]
+    detail = {**run, "public_decisions": decision_ledger(run), "scene_progress": scene_ledger(run),
+              "validation": validate_run(source, run) if run["status"] in {"completed", "early_end"} else []}
+    if view == "workspace":
+        fields = {"id", "template_id", "status", "messages", "config", "revision", "cursor", "errors",
+                  "pause_reason", "outcome_review", "review_progress", "agent_sessions", "public_decisions",
+                  "scene_progress", "validation", "vimax_events", "story_arc", "story_arc_source",
+                  "memory_status", "memory_reflections"}
+        detail = {key: value for key, value in detail.items() if key in fields}
+        detail["schedule_length"] = len(run.get("schedule", []))
+        detail["template"] = {**template, "minimum_for_one_customer": min_total(source, 1),
+                              "minimum_by_customer_count": {str(count): min_total(source, count) for count in range(1, 21)}}
+    return detail
 
 
 @app.get("/api/simulations/{session_id}/events")
