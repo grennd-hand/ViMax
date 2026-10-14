@@ -45,4 +45,11 @@ describe('agent config store', () => {
     const root = await fixture();
     await expect(saveAgentConfig(root, {sections: {llm: {base_url: 'file:///tmp/key'}}})).rejects.toThrow(/http/);
   });
+
+  it('persists reasoning effort and rejects unknown values', async () => {
+    const root = await fixture();
+    await saveAgentConfig(root, {sections: {llm: {model: 'gpt-6-sol', reasoning_effort: 'high'}}});
+    expect((await readAgentConfig(root)).sections.llm.reasoning_effort).toBe('high');
+    await expect(saveAgentConfig(root, {sections: {llm: {reasoning_effort: 'invalid'}}})).rejects.toThrow('推理强度');
+  });
 });

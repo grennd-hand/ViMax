@@ -40,3 +40,4 @@
 .dialogue-workspace .field input,.dialogue-workspace .field textarea,.dialogue-workspace .field select {color:var(--ink);background:var(--surface);border-color:var(--line)}
 .dialogue-workspace .bubble {background:var(--surface-soft);color:var(--ink)}
 @media(max-width:1000px){.dialogue-workspace .simulation-layout {grid-template-columns:1fr}}
+.dialogue-workspace .run-model{padding:8px 26px;color:var(--muted);font-size:12px;border-bottom:1px solid var(--line)}

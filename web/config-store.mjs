@@ -3,7 +3,7 @@ import path from 'node:path';
 import {parse, stringify} from 'yaml';
 
 const SECTION_FIELDS = {
-  llm: ['model_provider', 'model', 'base_url'],
+  llm: ['model_provider', 'model', 'base_url', 'reasoning_effort'],
   image: ['model', 'base_url'],
   video: ['model', 'base_url'],
   embedding: ['model_provider', 'model', 'base_url'],
@@ -70,6 +70,9 @@ function publicConfig(payload) {
 function validatedValue(value, label, maxLength) {
   if (typeof value !== 'string') throw new Error(`${label} must be a string`);
   const normalized = value.trim();
+  if (label === 'llm.reasoning_effort' && normalized && !['low', 'medium', 'high'].includes(normalized)) {
+    throw new Error('推理强度只能选择低、中或高');
+  }
   if (normalized.length > maxLength) throw new Error(`${label} is too long`);
   if (label.endsWith('.base_url') && normalized && !/^https?:\/\//i.test(normalized)) {
     throw new Error(`${label} must use http:// or https://`);

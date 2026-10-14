@@ -13,6 +13,7 @@ export type SessionSummary = {
 
 export type ConfigSection = {
   model_provider?: string;
+  reasoning_effort?: string;
   model: string;
   base_url: string;
   api_key: string;

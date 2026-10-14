@@ -215,6 +215,7 @@ function ConfigSectionEditor({definition, value, onChange}: {
           <label><span>模型供应商</span><input value={value.model_provider} onChange={(event) => onChange('model_provider', event.target.value)} /></label>
         )}
         <label><span>模型</span><input value={value.model} onChange={(event) => onChange('model', event.target.value)} /></label>
+        <label><span>推理强度</span><select value={value.reasoning_effort || ''} onChange={(event) => onChange('reasoning_effort', event.target.value)}><option value="">模型默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
         <label className="config-field-wide"><span>接口地址</span><input value={value.base_url} onChange={(event) => onChange('base_url', event.target.value)} inputMode="url" /></label>
         <label className="config-field-wide">
           <span>API 密钥 <i className={value.has_api_key ? 'is-configured' : ''}>{value.has_api_key ? '已配置' : '未配置'}</i></span>

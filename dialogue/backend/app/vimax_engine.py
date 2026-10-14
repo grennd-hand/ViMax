@@ -116,7 +116,8 @@ class RecordedChat:
         run = self.api.get_run(self.session_id)
         if run["status"] != "running":
             raise asyncio.CancelledError()
-        run.setdefault("vimax_calls", []).append({"stage": self.stage, "seconds": round(time.monotonic()-began, 2)})
+        run.setdefault("vimax_calls", []).append({"stage": self.stage, "seconds": round(time.monotonic()-began, 2),
+                                                 "model": self.chat.model_name, "reasoning_effort": self.chat.reasoning_effort})
         run.setdefault("vimax_raw", {})[self.stage] = response.content
         self.api.save_run(run)
         return response
@@ -139,7 +140,7 @@ async def process(session_id, api):
             chat = ChatOpenAI(model=run["config"].get("dialogue_model") or model_name,
                               api_key=key, base_url=base,
                               streaming=True, max_retries=0, max_tokens=16000, timeout=90,
-                              reasoning_effort="low" if re.fullmatch(r"gpt-(?:5|6)(?:\.\d+)?",run["config"].get("dialogue_model") or model_name) else None, http_async_client=http_client)
+                              reasoning_effort=api.model_reasoning_effort(run["config"]) or ("low" if re.fullmatch(r"gpt-(?:5|6)(?:\.\d+)?",run["config"].get("dialogue_model") or model_name) else None), http_async_client=http_client)
             writer_type = screenwriter_class()
             contract = writing_contract(template, run)
             if not run.get("vimax_story"):

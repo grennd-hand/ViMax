@@ -43,6 +43,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http
 tasks: dict[str, asyncio.Task] = {}
 _reasoning_unsupported: set[tuple[str, str]] = set()
 _run_model_client: ContextVar[httpx.AsyncClient | None] = ContextVar("run_model_client", default=None)
+_run_reasoning_effort: ContextVar[str | None] = ContextVar("run_reasoning_effort", default=None)
 
 
 @contextmanager
@@ -202,6 +203,22 @@ def dialogue_repair_model(config: dict) -> str | None:
             or os.getenv("MODEL_DIALOGUE_NAME") or os.getenv("MODEL_NAME") or None)
 
 
+def model_reasoning_effort(config: dict | None = None) -> str | None:
+    if config and config.get("reasoning_effort"):
+        return config["reasoning_effort"]
+    effort = os.getenv("MODEL_REASONING_EFFORT", "").strip()
+    config_file = APP_DIR.parent / "configs" / "agent.local.yaml"
+    if config_file.is_file():
+        import yaml
+        local = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+        llm = local.get("llm", {})
+        if "reasoning_effort" in llm:
+            effort = str(llm.get("reasoning_effort") or "").strip()
+    if effort and effort not in {"low", "medium", "high"}:
+        raise ValueError("推理强度只能选择低、中或高")
+    return effort or None
+
+
 async def model_json(system: str, payload: dict, *, temperature: float = 0.7, model_name: str | None = None,
                      call_budget_seconds: float | None = None) -> dict:
     base, key, name = model_settings()
@@ -226,8 +243,9 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                 body = {"model": candidate, "temperature": temperature,
                         "messages": [{"role": "system", "content": system},
                                      {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]}
-                effort = os.getenv("MODEL_SCENE_REASONING_EFFORT", "low").strip()
-                if (payload.get("scene_draft") and effort
+                explicit_effort = _run_reasoning_effort.get() or model_reasoning_effort()
+                effort = explicit_effort or os.getenv("MODEL_SCENE_REASONING_EFFORT", "low").strip()
+                if explicit_effort or (payload.get("scene_draft") and effort
                         and re.fullmatch(r"gpt-(?:5|6)(?:\.\d+)?", candidate)
                         and (base, candidate) not in _reasoning_unsupported):
                     body["reasoning_effort"] = effort
@@ -244,6 +262,8 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                             error = {}
                         detail = str(error)
                         if "reasoning_effort" in detail and re.search(r"unsupported|not supported|unknown|unrecognized|invalid", detail, re.I):
+                            if explicit_effort:
+                                raise RuntimeError("模型接口不支持所选推理强度，未自动降低强度")
                             _reasoning_unsupported.add((base, candidate))
                             body.pop("reasoning_effort")
                             response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
@@ -363,7 +383,8 @@ class SimulationConfig(BaseModel):
     character_ids: dict[str, str] = Field(default_factory=dict)
     persona_strength: float = Field(default=0.85, ge=0, le=1)
     language: str = "zh-CN"
-    dialogue_model: Literal["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna"] | None = None
+    dialogue_model: Literal["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol"] | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
 
     @field_validator("language")
     @classmethod
@@ -383,9 +404,16 @@ class PersonaRequest(BaseModel):
 
 @app.get("/api/health")
 def health() -> dict:
+    try:
+        base, key, name = model_settings()
+        configured = bool(base and key and name)
+    except RuntimeError:
+        configured, key, name = False, "", ""
     return {"ok": True,
-            "model_configured": bool(os.getenv("MODEL_API_BASE_URL") and os.getenv("MODEL_NAME")),
-            "api_key_loaded": bool(os.getenv("MODEL_API_KEY")),
+            "model_configured": configured,
+            "api_key_loaded": bool(key),
+            "model": name,
+            "reasoning_effort": model_reasoning_effort(),
             "memory_backend": "sqlite",
             "embedding_model": os.getenv("MODEL_EMBEDDING_NAME", "text-embedding-3-small")}
 
@@ -562,6 +590,7 @@ async def start_simulation(config: SimulationConfig) -> dict:
     except (ValueError, RuntimeError) as exc:
         raise HTTPException(422, str(exc)) from exc
     normalized_config = config.model_dump()
+    normalized_config["reasoning_effort"] = model_reasoning_effort(normalized_config)
     roles = ["坐席"] + template["source"]["accounts"] + [f"客户{i + 1}" for i in range(config.customer_count)]
     defaults = default_persona_cards(roles, config.language)
     normalized_config["persona_cards"] = {
@@ -703,10 +732,12 @@ def export(session_id: str, format: str) -> Response:
 async def process_run(session_id: str) -> None:
     async with httpx.AsyncClient(timeout=float(os.getenv("MODEL_TIMEOUT_SECONDS", "60")), trust_env=False) as client:
         token = _run_model_client.set(client)
+        effort_token = _run_reasoning_effort.set(model_reasoning_effort(get_run(session_id)["config"]))
         try:
             await _process_run(session_id)
         finally:
             _run_model_client.reset(token)
+            _run_reasoning_effort.reset(effort_token)
 
 
 

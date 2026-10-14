@@ -503,6 +503,17 @@ a:focus-visible {
   grid-column: 1 / -1;
 }
 
+.config-fields select {
+  min-width: 0;
+  width: 100%;
+  min-height: 40px;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
 .settings-loading {
   display: grid;
   min-height: 0;
