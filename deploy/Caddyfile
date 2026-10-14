@@ -1,0 +1,15 @@
+:8080 {
+    basic_auth {
+        {$VIMAX_ACCESS_USER} {$VIMAX_ACCESS_HASH}
+    }
+    request_body {
+        max_size 100MB
+    }
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+    }
+    reverse_proxy workbench:4173 {
+        flush_interval -1
+    }
+}
