@@ -34,7 +34,7 @@ class ConversationThread(BaseModel):
     topic: str
     kind: Literal['业务', '日常', '关系']
     roles: list[str]
-    seed: str = Field(description='可引出具体交流的情境，不写预定台词或统一结论')
+    seed: str = Field(description='可聊的一件具体经历或问题及其细节，不写谁接谁、讨论原则或统一结论')
 
 
 class PersonSituation(BaseModel):
@@ -45,6 +45,8 @@ class PersonSituation(BaseModel):
 
 
 class ConversationBeat(module.Event):
+    description: str = Field(min_length=1, description='可触发的具体经历或信息差，不预定转场或群体结论')
+    process_chain: list[str] = Field(min_length=1, description='素材里有哪些不同的实际细节，不安排逐人表态或依次领悟')
     roles: list[str] = Field(min_length=1)
     cause: str = Field(min_length=1)
     outcome: str = Field(min_length=1)
@@ -60,6 +62,7 @@ class PersonIntent(PersonSituation):
     leave_unanswered: str = Field(min_length=1, description='即使看到了也不想回应的内容')
     voice: str = Field(min_length=1, description='表达长度、直接程度、解释习惯，不写固定口头禅')
     relationship: str = Field(min_length=1, description='起初是陌生群友；熟悉程度只随公开互动改变')
+    experience_seed: str = Field(default='', description='本人可能愿意提起的一件具体生活经历，含实际细节；不是固定道具或待办，不要求每人都讲')
 
 
 class OrganicPlan(BaseModel):
@@ -77,13 +80,19 @@ def planning_requirement(run: dict) -> str:
             '\n' + opening_requirement(run) +
             '先把人格卡转成每个人的wants、attention、reply_when、leave_unanswered、voice；'
             '角色差异必须影响注意、误解、选择和接话对象，不是给每个人分配一种生活道具。'
+            '本人还可以有与参与任务无关的真实兴趣和具体生活经历，不把所有人的需要都写成评估任务或观察别人如何作决定。'
             '初入群互不熟悉；不编造共同过去。少数人可逐渐聊熟，别人不必跟着捧场。'
             '事件是可触发的交流素材，不是时间表。禁止分配消息编号、条数配额、固定主行动者或轮流完成名单。'
             'index只标识素材，is_last只表示列表结束，不代表群聊必须按顺序演完；'
             '无需把所有素材都用上。process_chain描述信息差或真实意见如何变化，而非逐项操作汇报。'
+            '150条准备约6至10个素材即可，业务流程作为完整因果线，另备2至4条有具体经历细节的支线；'
+            '每个字段用简短描述，不为填满schema上限凑18个事件，不把同一次说明拆成多个理解障碍。'
             '每个素材给出trigger和stop_when；问题有答案、笑点已接住、个人小事已办完就停止，不续写道具状态。'
             '为所需长篇准备有区别的兴趣、真实疑问、个人经历和观点碰撞，日常选择无需变成一串清洁或吃饭步骤。'
             '可以聊出分歧、答非预期或无人接话，不预排谁赞同谁；不以开新业务条件或页面故障制造信息量。'
+            '不把自主选择、个人边界、理解对方、一次和长期的区别、客气话含义或语气误会规划成长话题；'
+            '这些是创作约束，不是群友要共同讨论的课程。不能让一句普通告别引发多人分析态度。'
+            '个人经历可以有普通物品、具体场景和小插曲，明确属于本人生活，不暗示它是任务商品、任务页面或母本活动的真实结果。'
             '业务事实仅来自母本；人物决定和动作仍须遵守已公开信息与因果顺序。'
             '仅返回以下JSON结构，所有说明使用输出语言：\n' +
             json.dumps(OrganicPlan.model_json_schema(), ensure_ascii=False)

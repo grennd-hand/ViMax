@@ -770,6 +770,8 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "以及是否多人轮流重复同一未知条件或风险提醒；保留必要提醒，但不要让它占据整段对话。"
         "以及角色口吻是否逐渐混成同一个人。style_findings 是带原句的候选证据，须结合上下文判断；确实有不同观察或自然回应时不要误报。"
         "跨全文检查同一生活小事是否被延长为大量道具状态汇报、同一个笑点是否反复解释；"
+        "同样检查换话题后的语义重复：反复讲个人边界、如何安排空闲、客气话该问清、一次尝试不等于长期承诺，"
+        "即便每人用了不同例子，已经得到同一结论又无新信息仍应标出；不要把群聊写成理解态度的讨论课。"
         "热饭到收拾餐盒、挑照片到擦杯子等主题即使每条不同，也不能仅靠微小动作变化撑篇幅。"
         "结合persona_cards检查不同人物的关注点、判断和接话意愿，不用名人腔或口头禅衡量人格。"
         "检查是否每次提问都被群友夸赞、每句玩笑都获捧场、各人操作汇报可以互换署名；引用两处以上证据再判断模式。"
@@ -803,6 +805,7 @@ async def review_dialogue(template: dict, run: dict) -> dict:
          "public_decisions": decision_ledger(run),
          "completion_actions": template["analysis"].get("completion_actions"),
          "persona_cards": run["config"].get("persona_cards", {}),
+         "private_character_intents": run.get("person_situations", {}) if run['config'].get('dialogue_flow_version', 1) >= 3 else {},
          "rolling_conversation": run["config"].get("dialogue_flow_version", 1) >= 2,
          "naturalness_evidence": naturalness_evidence(run["messages"]),
          "memory_enabled": bool(run["config"].get("memory_enabled") and run.get("character_bindings")),
