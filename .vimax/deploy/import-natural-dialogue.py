@@ -13,6 +13,36 @@ import uuid
 MESSAGE_FIELDS = ('seq', 'sender', 'content', 'reply_to', 'delay', 'stage', 'type',
                   'image_code', 'image_mode', 'replace_date')
 SNAPSHOT_FILES = ('run.json', 'messages.md', 'messages.xlsx', 'manifest.json')
+INDEPENDENT_SERIES = '独立随机-20261015'
+
+
+def is_independent(run):
+    record = run.get('version_record') or {}
+    return (record.get('method') == 'independent_generation'
+            or record.get('series') == INDEPENDENT_SERIES
+            or (run.get('independence') or {}).get('method') == 'independent_generation')
+
+
+def independent_evidence(run, version):
+    """Check preserved fresh-run evidence, not a claim of semantic uniqueness."""
+    family, revision = version_parts(version)
+    assert 1 <= family <= 40, 'Independent series expects family V01..V40'
+    record, plan = run.get('version_record', {}), run.get('creative_variation') or {}
+    proof, reference = run.get('independence') or {}, run.get('corpus_reference') or {}
+    assert record.get('method') == 'independent_generation' and record.get('series') == INDEPENDENT_SERIES
+    for item in (record, plan, proof):
+        assert item.get('parent_run', 'missing') is None, 'Independent draft cannot inherit a parent run'
+        assert item.get('parent_version') in (None, ''), 'Independent draft cannot inherit a parent version'
+    assert plan.get('method') == proof.get('method') == 'independent_generation'
+    assert proof.get('initial_messages') == 0 and proof.get('initial_story', 'missing') is None
+    assert proof.get('fresh_story_world') == run['config'].get('story_world') and proof.get('fresh_story_world')
+    assert isinstance(plan.get('style_label'), str) and plan['style_label'].strip(), 'Independent style label required'
+    assert plan.get('persona_cards') == run['config'].get('persona_cards') and plan.get('persona_cards'), 'Independent cast differs from saved plan'
+    assert isinstance(reference.get('samples'), list) and reference['samples'], 'Actual public corpus samples required'
+    assert isinstance(reference.get('sources'), list) and reference['sources'], 'Public corpus source provenance required'
+    assert all(source.get('url') and source.get('license') for source in reference['sources'])
+    return {'series': INDEPENDENT_SERIES, 'method': 'independent_generation', 'parent_run': None,
+            'display_label': f'独立{family:02d}' + ('-' + revision if revision else ''), 'style_label': plan['style_label']}
 
 
 def version_parts(label):
@@ -107,6 +137,12 @@ def publication_metadata(run, source_directory, version, selected, source_sha256
             'program_review_state': 'deferred' if deferred else 'reviewed' if history else 'not_completed',
             'contract_errors': list(checks)}
     metadata.update(correction_metadata(source_directory, version, source_sha256))
+    if is_independent(run):
+        metadata.update(independent_evidence(run, version))
+        metadata['review_label'] = {'candidate': '完整双审候选', 'alternative': '表达备选',
+                                    'needs_revision': '需修订'}[review['verdict']]
+        if run['status'] == 'failed': metadata['review_label'] = '需修订'
+        metadata['user_selected'] = bool(selected)
     return metadata
 
 
@@ -215,7 +251,11 @@ def main():
     assert run['config']['dialogue_flow_version'] in {3, 4}
     assert run['config']['dialogue_model'] == 'gpt-6-sol'
     assert run['config']['reasoning_effort'] == 'high'
-    evolution = family_number >= 4
+    independent = is_independent(run)
+    evolution = family_number >= 4 or independent
+    if independent:
+        independent_evidence(run, args.version)
+        assert run.get('candidate_versions'), 'Independent complete draft requires archived snapshots'
     if evolution or args.selected:
         checks = contract_errors(template['source'], {**run, 'status': 'completed'})
         if args.selected:
@@ -290,6 +330,10 @@ def main():
                 program = {'deferred': '模型待审', 'reviewed': '模型已全文复核', 'not_completed': '模型审阅未完成'}[publication['program_review_state']]
                 record.update(project_name=args.version + ' · ' + human + ' · ' + program,
                               summary=publication['human_summary'])
+                if independent:
+                    record['project_name'] = (publication['display_label'] + ' · ' + publication['style_label']
+                                              + ' · ' + ('用户已选' if args.selected else publication['review_label'])
+                                              + ' · ' + program)
             record.setdefault('created_at', run['created_at'])
             record.setdefault('updated_at', run.get('updated_at', run['created_at']))
             sessions[project_id] = record

@@ -57,6 +57,10 @@ def screenwriter_class():
     return module.Screenwriter
 
 
+class ModelRefusalError(RuntimeError):
+    """A returned refusal is evidence, not a request to repair line formatting."""
+
+
 def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: int | None = None) -> list[dict]:
     messages = []
     roles = set(run["agent_sessions"])
@@ -98,6 +102,8 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
                              "source_rows": [], "reply_source_seq": None, "stage": stage,
                              "reaction": "refuse" if declined else "continue", "task_state": "declined" if declined else "active", "performed_steps": []})
     count = expected_count if expected_count is not None else run['config']['target_messages']
+    if not messages and re.search(r'无法协助|无法编写|不能协助|不能帮助|我不能|cannot (?:help|assist)', '\n'.join(scenes), re.I):
+        raise ModelRefusalError('模型返回了拒绝说明，未生成剧本；原始响应已保留，不按格式错误重试')
     if len(messages) != count:
         raise ValueError(f'需要{count}条消息，实际生成{len(messages)}条')
     if start == 1 and messages[0]['sender'] != '坐席':

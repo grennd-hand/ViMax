@@ -6,10 +6,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.opening import opening_policy
-from app.vimax_engine import RecordedChat, decode_scenes, process, revise
+from app.vimax_engine import ModelRefusalError, RecordedChat, decode_scenes, process, revise
 
 
 class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
+    def test_refusal_without_dialogue_is_not_a_repairable_line_count_error(self):
+        run = {'config': {'target_messages': 150}, 'agent_sessions': {'坐席': {}}}
+        with self.assertRaises(ModelRefusalError):
+            decode_scenes(['无法协助编写该请求。'], run)
+
     async def test_failed_model_call_is_visible_without_archiving_private_error_text(self):
         state = {'status': 'running'}
         chat = SimpleNamespace(model_name='gpt-6-sol', reasoning_effort='high',
