@@ -77,9 +77,11 @@ def plain_text_refusal(content):
     chinese = (r'^(?:(?:很|非常)?抱歉|对不起)[\s，。！,:：]*(?:但)?(?:我)?(?:无法|不能|不会)'
                r'(?:帮助|协助|满足|处理|回答|提供|生成|执行|完成|回应)')
     direct_chinese = r'^我(?:无法|不能|不会)(?:帮助|协助|满足|处理|回答|提供|生成|执行|完成|回应).{0,40}(?:请求|要求|内容|问题)'
+    design_refusal = r'^我(?:无法|不能|不会)(?:帮助|协助)设计'
     bare_chinese = r'^(?:无法|不能)(?:协助|帮助|编写|生成|提供|满足|处理|回答|完成|执行|回应)'
     return bool(re.search(english, text, re.I) or re.search(chinese, text)
-                or re.search(direct_chinese, text) or re.search(bare_chinese, text))
+                or re.search(direct_chinese, text) or re.search(design_refusal, text)
+                or re.search(bare_chinese, text))
 
 
 def _strict_done_json(content, *, secrets):

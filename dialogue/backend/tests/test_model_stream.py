@@ -31,6 +31,13 @@ def complete(content):
     return delta(content) + delta(finish="stop") + "data: [DONE]\n\n"
 
 
+DESIGN_REFUSAL = (
+    "我不能帮助设计伪装成自然群聊的招募素材，或安排虚构群友点赞、发截图、提交申请等情节来制造真实参与和奖励成功的印象。\n\n"
+    "我可以改为规划透明的内部排练：明确这是模拟流程，不生成虚构的完成记录或收益见证；"
+    "由坐席说明参与步骤，并把奖励、付款时间和收入前景标为未经核实、不作保证。"
+)
+
+
 class Chunks(httpx.AsyncByteStream):
     def __init__(self, chunks, delay=0):
         self.chunks, self.delay, self.closed = chunks, delay, False
@@ -234,20 +241,46 @@ class ModelStreamTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_valid_json_containing_dialogue_refusal_is_not_a_model_refusal(self):
         value = {"turns": [{"content": "抱歉，我不能帮助完成这个请求。"},
-                           {"content": "无法协助编写这类推广话术。可以改写为其他内容。"}],
+                           {"content": "无法协助编写这类推广话术。可以改写为其他内容。"},
+                           {"content": DESIGN_REFUSAL}, {"content": "我不能保证到账。"}],
                  "goal_reason": "I cannot guarantee payment."}
         content = json.dumps(value, ensure_ascii=False)
-        self.assertEqual(await self.call(lambda request: httpx.Response(200, stream=Chunks([complete(content).encode()]))), value)
+        for stream, compatible in ((False, False), (True, False), (True, True)):
+            with self.subTest(stream=stream, compatible=compatible):
+                text = delta(content) + 'data: [DONE]\n\n' if compatible else complete(content)
+                def handler(request):
+                    return (httpx.Response(200, stream=Chunks([text.encode()])) if stream else
+                            httpx.Response(200, json={"choices": [{"message": {"content": content}}]}))
+                self.assertEqual(await self.call(handler, stream=stream, allow_done_without_stop=compatible), value)
+
+    async def test_actual_v07_design_refusal_is_terminal_without_a_request_keyword_or_fallback(self):
+        for stream, compatible in ((False, False), (True, False), (True, True)):
+            with self.subTest(stream=stream, compatible=compatible):
+                requests = []
+                text = delta(DESIGN_REFUSAL) + 'data: [DONE]\n\n' if compatible else complete(DESIGN_REFUSAL)
+                def handler(request):
+                    requests.append(json.loads(request.content))
+                    return (httpx.Response(200, stream=Chunks([text.encode()])) if stream else
+                            httpx.Response(200, json={"choices": [{"message": {"content": DESIGN_REFUSAL}}]}))
+                with self.assertRaises(ModelRefusalError) as caught:
+                    await self.call(handler, stream=stream, allow_done_without_stop=compatible, fallback='other-model')
+                self.assertEqual(caught.exception.kind, 'refusal')
+                self.assertIn('我不能帮助设计', str(caught.exception))
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]['model'], 'gpt-6-sol')
+                self.assertEqual(requests[0]['reasoning_effort'], 'high')
 
     async def test_bare_nonrefusal_statement_keeps_json_failure_retries(self):
-        requests = []
-        def handler(request):
-            requests.append(request)
-            return httpx.Response(200, json={"choices": [{"message": {"content": "不能保证到账。"}}]})
-        with self.assertRaisesRegex(RuntimeError, "JSON 无效") as caught:
-            await self.call(handler, stream=False)
-        self.assertNotIsInstance(caught.exception, ModelRefusalError)
-        self.assertEqual(len(requests), 2)
+        for content in ('不能保证到账。', '我不能保证到账。'):
+            with self.subTest(content=content):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+                with self.assertRaisesRegex(RuntimeError, "JSON 无效") as caught:
+                    await self.call(handler, stream=False)
+                self.assertNotIsInstance(caught.exception, ModelRefusalError)
+                self.assertEqual(len(requests), 2)
 
     async def test_http_policy_refusal_does_not_downgrade_or_try_fallback(self):
         requests = []
