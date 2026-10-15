@@ -842,6 +842,7 @@ async def review_dialogue(template: dict, run: dict) -> dict:
                           if run['config'].get('dialogue_flow_version', 1) >= 4 else None),
          "workflow_steps": template["analysis"].get("workflow_steps") or analyze(template["source"])["workflow_steps"],
          "messages": [{"seq": m["seq"], "sender": m["sender"], "stage": m["stage"], "content": m["content"],
+                       "reply_to": m.get("reply_to"), "delay": m.get("delay"),
                        "type": m.get("type"), "image_code": m.get("image_code"), "image_mode": m.get("image_mode")}
                       for m in run["messages"]]}, temperature=0.1,
         model_name=os.getenv("MODEL_REVIEW_NAME"),
