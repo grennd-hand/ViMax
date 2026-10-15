@@ -27,7 +27,7 @@ from .locale import language_context, message_char_limit, normalize_language
 from .persona_library import default_cards, default_entries, persona_library
 from .opening import opening_policy, opening_requirement, opening_schedule
 from .conversation_flow import naturalness_evidence
-from .model_stream import ModelRefusalError, check_model_refusal, plain_text_refusal, stream_model_content
+from .model_stream import ModelRefusalError, check_model_refusal, plain_text_refusal, safe_model_reason, stream_model_content
 from .persona_memory import record_public_memory
 from .memory_store import SQLiteMemoryStore, bind_characters, init_memory_schema, normalize_reflections, reflection_due, sync_accepted_memory
 from .memory_cognition import prepare_memory_context
@@ -341,10 +341,12 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                     failure = f"模型 {candidate} 请求超时"
                 except httpx.TransportError:
                     failure = f"模型 {candidate} 连接中断或传输失败"
-                except json.JSONDecodeError:
-                    failure = f"模型 {candidate} 返回的 JSON 无效"
-                except (KeyError, IndexError, TypeError, ValueError):
-                    failure = f"模型 {candidate} 返回的响应结构或流式格式无效"
+                except json.JSONDecodeError as exc:
+                    detail = safe_model_reason(f"{type(exc).__name__}: {exc}", secrets=(base, key))
+                    failure = f"模型 {candidate} 返回的 JSON 无效：{detail}"
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    detail = safe_model_reason(f"{type(exc).__name__}: {exc}", secrets=(base, key))
+                    failure = f"模型 {candidate} 返回的响应结构或流式格式无效：{detail}"
             if attempt == 0 and deadline - time.monotonic() > 1:
                 await asyncio.sleep(1)
     finally:

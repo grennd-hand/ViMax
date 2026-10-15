@@ -306,6 +306,49 @@ class ModelStreamTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(requests), 2)
                 self.assertNotIn("private details", str(caught.exception))
 
+    async def test_format_diagnostics_preserve_internal_reason_and_json_position_without_extra_requests(self):
+        cases = [
+            (False, {}, ("响应结构", "KeyError", "choices")),
+            (False, {"choices": []}, ("响应结构", "IndexError", "list index out of range")),
+            (True, event({"usage": {}}), ("流式格式", "ValueError", "缺少choices")),
+            (True, delta('{"ok":true}') + "data: [DONE]\n\n", ("流式格式", "未正常结束即返回DONE")),
+            (True, delta('{"ok":true}') + delta(finish="stop"), ("流式格式", "未收到完整stop与DONE")),
+            (True, delta('{"ok":true}') + delta(finish="length"), ("流式格式", "未完整结束：length")),
+            (True, "data: {invalid}\n\n", ("JSON 无效", "JSONDecodeError", "line 1 column 2 (char 1)")),
+            (True, complete('{"ok":'), ("JSON 无效", "JSONDecodeError", "line 1 column 7 (char 6)")),
+        ]
+        for stream, value, expected in cases:
+            with self.subTest(stream=stream, expected=expected):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return (httpx.Response(200, stream=Chunks([value.encode()])) if stream else
+                            httpx.Response(200, json=value))
+                with self.assertRaises(RuntimeError) as caught:
+                    await self.call(handler, stream=stream)
+                for part in expected:
+                    self.assertIn(part, str(caught.exception))
+                self.assertEqual(len(requests), 2)
+
+    async def test_format_diagnostics_redact_bound_and_remove_controls_from_upstream_reason(self):
+        reason = ("unexpected finish test-key https://example.invalid/v1 example.invalid "
+                  "Bearer test-key api_key=test-key\n\x00" + "x" * 600)
+        requests = []
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, stream=Chunks([delta(finish=reason).encode()]))
+        with self.assertRaises(RuntimeError) as caught:
+            await self.call(handler)
+        rendered = str(caught.exception)
+        self.assertIn("ValueError: 模型流未完整结束", rendered)
+        self.assertIn("unexpected finish", rendered)
+        self.assertNotIn("test-key", rendered)
+        self.assertNotIn("example.invalid", rendered)
+        self.assertNotIn("\n", rendered)
+        self.assertNotIn("\x00", rendered)
+        self.assertLess(len(rendered), 500)
+        self.assertEqual(len(requests), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
