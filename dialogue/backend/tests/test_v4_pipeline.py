@@ -11,6 +11,17 @@ from app.vimax_engine import ModelRefusalError, RecordedChat, decode_scenes, pro
 
 
 class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
+    def test_fresh_image_placeholder_prefix_is_normalized_without_changing_spoken_business_code(self):
+        run = {'config': {'target_messages': 1, 'dialogue_flow_version': 4, 'creation_mode': 'independent_random'},
+               'agent_sessions': {'客户1': {}}}
+        line = '029|客户1|0|4|自然群聊|图片+文本|SCREENSHOT-01|申请代码是【FHR888】。'
+        message = decode_scenes([line], run, 29, 1)[0]
+        self.assertEqual(message['image_code'], 'SCREENSHOT_01')
+        self.assertEqual(message['content'], '申请代码是【FHR888】。')
+        run['config']['creation_mode'] = 'fixed'
+        with self.assertRaises(ValueError):
+            decode_scenes([line], run, 29, 1)
+
     def test_same_meaning_stage_label_from_actual_model_response_is_normalized(self):
         run = {'config': {'target_messages': 1, 'dialogue_flow_version': 4}, 'agent_sessions': {'客户1': {}}}
         message = decode_scenes(['022|客户1|017|11|进入正题|文本|-|推广商品这四个字还是太宽了。'], run, 22, 1)[0]

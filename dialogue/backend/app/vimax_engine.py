@@ -95,6 +95,10 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
                 raise ValueError(f"消息{seq}使用了未设置的人物：{speaker}")
             if reply_to is not None and not 0 < reply_to < seq:
                 raise ValueError(f"消息{seq}回复了尚未出现的消息")
+            if (media and run['config'].get('creation_mode') == 'independent_random'
+                    and kind.strip() in {'图片', '图片+文本'}
+                    and re.fullmatch(r'SCREENSHOT-[A-Za-z0-9_-]+', image_code.strip())):
+                image_code = 'SCREENSHOT_' + image_code.strip()[len('SCREENSHOT-'):]
             payload = decode_media(kind, image_code, text) if media else {'type': '文本', 'content': text.strip(), 'image_code': None, 'image_mode': None}
             if (not payload['content'] and payload['type'] != '图片') or len(payload['content']) > message_char_limit(run["config"].get("language"), seat=speaker == "坐席"):
                 raise ValueError(f"消息{seq}为空或超出单条长度")
@@ -449,7 +453,11 @@ async def process(session_id, api):
         run = api.get_run(session_id)
         if run["status"] == "running":
             run["status"] = "failed"
-            run["errors"] = [str(exc)[:1000]]
+            detail = str(exc).strip()
+            if not detail:
+                detail = ('模型服务读取响应超时' if isinstance(exc, (httpx.TimeoutException, TimeoutError))
+                          else f'模型调用失败（{type(exc).__name__}）')
+            run["errors"] = [detail[:1000]]
             api.save_run(run)
 
 

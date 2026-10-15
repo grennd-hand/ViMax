@@ -21,6 +21,12 @@ def announcement():
 
 
 class MediaContractTests(unittest.TestCase):
+    def test_alias_of_known_placeholder_is_still_rejected_in_spoken_content(self):
+        messages = [announcement(), message(2, text='', kind='图片', code='SCREENSHOT_01'),
+                    message(3, text='把截图 SCREENSHOT-01 和【FHR888】发出去了。')]
+        self.assertTrue(any('消息 3' in error and '图片素材码' in error
+                            for error in screenshot_errors(source(), run(messages))))
+
     def test_decode_text_and_image_metadata_are_separate(self):
         for code in ("-", "0", "", None):
             self.assertEqual(decode_media("文本", code, " 普通内容 "),
