@@ -246,6 +246,8 @@ async def process(session_id, api):
                         try:
                             segment = decode_scenes(scenes, run, start, count)
                             combined = history + segment
+                            if len(combined) >= target:
+                                checkpoint_candidate(api, run, combined, '完整写作候选，尚未结构检查')
                             partial = {**run, 'messages': combined, 'status': 'running'}
                             errors = contract_errors(template['source'], partial)
                             if errors:
@@ -268,7 +270,6 @@ async def process(session_id, api):
                     run = latest
                 run['review_progress']['phase'] = 'validate'
                 api.save_run(run)
-                checkpoint_candidate(api, run, history, '首次完整写作，尚待程序与人工检查')
             elif not run.get('vimax_draft'):
                 writer = writer_type(chat_model=RecordedChat(chat, api, session_id, "write"))
                 run["review_progress"]["phase"] = "writing"
@@ -450,6 +451,8 @@ async def revise(writer_type, chat, api, session_id, template, run, issues, reas
     latest=api.get_run(session_id)
     run['vimax_calls']=latest.get('vimax_calls',[])
     run['vimax_raw']=latest.get('vimax_raw',{})
+    if run['config'].get('dialogue_flow_version', 1) >= 4:
+        run['vimax_samples'] = latest.get('vimax_samples', [])
     updated = decode_scenes(scenes,run)
     checkpoint_candidate(api, run, updated, '完整修订：' + reason)
     if run['config'].get('dialogue_flow_version', 1) >= 2:

@@ -6,11 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.opening import opening_policy
-from app.vimax_engine import process
+from app.vimax_engine import decode_scenes, process, revise
 
 
 class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
-    async def test_image_event_survives_generation_broadcast_review_and_immutable_archive(self):
+    async def run_case(self, invalid_first=False):
         roles = ['坐席', '客户1', '客户2']
         state = {'id': 'd' * 32, 'template_id': 'source', 'status': 'running', 'cursor': 0,
                  'config': {'dialogue_flow_version': 4, 'opening_policy': opening_policy(9),
@@ -26,6 +26,7 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
                     'messages': [{'sender': '坐席', 'source_row': 1,
                                   'content': '打开 https://example.invalid/test 点赞后截图先发群里，再发给经理。'}]}}
         reviews = []
+        requests = []
 
         def get_run(_):
             return copy.deepcopy(state)
@@ -46,7 +47,8 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
             async def write_script_based_on_story(self, story, request, system_prompt):
                 self_request = request
                 assert '八项格式' in self_request
-                return ['\n'.join([
+                requests.append(request)
+                lines = [
                     '001|坐席|0|4|寒暄暖场|文本|-|大家好',
                     '002|客户1|0|7|了解群用途|文本|-|这里做什么的？',
                     '003|坐席|0|8|自然群聊|文本|-|打开 https://example.invalid/test 点赞后截图先发群里，再发给经理。',
@@ -56,7 +58,10 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
                     '007|客户1|0|42|自然群聊|文本|-|截图和代码都发给经理了',
                     '008|客户2|0|20|自然群聊|文本|-|我还没打开，先看看',
                     '009|客户1|0|6|自然群聊|文本|-|嗯。',
-                ])]
+                ]
+                if invalid_first and len(requests) == 1:
+                    lines[4] = '005|客户1|0|15|自然群聊|文本|-|截图已经发群里了'
+                return ['\n'.join(lines)]
 
         with tempfile.TemporaryDirectory() as directory:
             api = SimpleNamespace(get_run=get_run, save_run=save_run, get_template=lambda _: template,
@@ -70,11 +75,58 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(state['messages'][4]['type'], '图片')
             self.assertEqual(reviews[0]['messages'][4]['image_code'], 'SCREENSHOT_C1_01')
             self.assertEqual(state['messages'][4]['content'], '')
-            self.assertEqual(len(state['candidate_versions']), 1)
-            record = state['candidate_versions'][0]
+            self.assertEqual(len(state['candidate_versions']), 2 if invalid_first else 1)
+            record = state['candidate_versions'][-1]
             snapshot = Path(directory) / record['path']
             self.assertIn('待补素材码：SCREENSHOT_C1_01', (snapshot / 'messages.md').read_text(encoding='utf-8'))
             self.assertEqual(record['capture_status'], 'running')
+            if invalid_first:
+                self.assertEqual(len(requests), 2)
+                rejected = Path(directory) / state['candidate_versions'][0]['path']
+                self.assertIn('截图已经发群里了', (rejected / 'messages.md').read_text(encoding='utf-8'))
+
+    async def test_image_event_survives_generation_broadcast_review_and_immutable_archive(self):
+        await self.run_case()
+
+    async def test_rejected_complete_first_draft_is_retained_before_retry(self):
+        await self.run_case(invalid_first=True)
+
+    async def test_revision_keeps_new_raw_response_when_working_run_is_saved(self):
+        run = {'id': 'e' * 32, 'status': 'running', 'config': {
+            'dialogue_flow_version': 4, 'target_messages': 3, 'language': 'zh-CN', 'customer_count': 1,
+            'persona_cards': {'坐席': {}, '客户1': {}}}, 'agent_sessions': {'坐席': {}, '客户1': {}},
+            'schedule': [{'stage': stage} for stage in ('寒暄暖场', '了解群用途', '自然群聊')],
+            'messages': [], 'vimax_samples': []}
+        lines = ['001|坐席|0|4|寒暄暖场|文本|-|大家好',
+                 '002|客户1|0|8|了解群用途|文本|-|这里做什么的？',
+                 '003|坐席|0|5|自然群聊|文本|-|这里交流日常问题。']
+        run['messages'] = decode_scenes(['\n'.join(lines)], run)
+        state = copy.deepcopy(run)
+
+        def get_run(_):
+            return copy.deepcopy(state)
+
+        def save_run(value):
+            nonlocal state
+            state = copy.deepcopy(value)
+
+        class Writer:
+            def __init__(self, chat_model):
+                pass
+
+            async def write_script_based_on_story(self, story, request, system_prompt):
+                latest = get_run(run['id'])
+                latest['vimax_samples'].append({'stage': 'revision', 'content': 'preserved raw sample'})
+                save_run(latest)
+                return ['\n'.join(lines)]
+
+        template = {'analysis': {}, 'source': {'accounts': [], 'codes': [],
+                    'messages': [{'sender': '坐席', 'source_row': 1, 'content': '这里交流日常问题。'}]}}
+        with tempfile.TemporaryDirectory() as directory:
+            api = SimpleNamespace(get_run=get_run, save_run=save_run, DATA_DIR=Path(directory))
+            await revise(Writer, None, api, run['id'], template, run, [], 'test revision')
+            save_run(run)
+        self.assertEqual(state['vimax_samples'], [{'stage': 'revision', 'content': 'preserved raw sample'}])
 
 
 if __name__ == '__main__':
