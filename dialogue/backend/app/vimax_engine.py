@@ -25,15 +25,20 @@ from .scene_memory import apply_review_actions, apply_review_decisions
 from .narrative_plan import planning_requirement, parse_plan
 from .opening import opening_requirement, opening_stage
 from .conversation_flow import STAGES, rolling_context, naturalness_evidence, flow_errors
+from .media_contract import decode_media, screenshot_errors
+from .version_archive import archive_candidate
 
 ROOT = Path(__file__).resolve().parents[3]
 PLAN_PROMPT = """你是多人群聊编剧。母本提供业务事实，群友有自己的关注和需求。先规划人为什么开口，再准备可能被触发的话题；不写逐句台词，不替每个人安排一段生活展示或任务表演。业务动作按已公开信息发生，话题不按人头或完成位置排队。普通经历可以创作，不得变成新业务条件、已核实结果或共同过去。"""
 WRITE_PROMPT = """你在续写多人群聊。每条发言先在内部确定说话人为什么此刻想说、对哪条公开话有反应、这次带来什么不同；没有动机的人不分配台词。不要输出这个判断过程。
 人物的attention、reply_when、leave_unanswered和人格卡决定接话对象、发言多少、观点和解释习惯。有人直问短答，有人愿意讲自己的具体经历，有人接一个细节或不认同；不是大家都说一句体谅、打趣或总结。不要用‘我就这样的人’解释人设，不照搬名人身份、口头禅或原作经历。
 先回应对方真正问的部分；若不知道就不装懂。已回答的问题没有新的个人情境就不重问。普通陈述不需要别人确认，提问也不用被夸‘问得好’，玩笑可没人接。群友初时陌生，不立即相互管饭、提醒喝水或替对方安排；亲近需要前面的公开互动。
+陌生群友开始只交流自己此刻愿意说的部分；少数人因具体共同兴趣逐渐多聊，不让全群立即轮流讲生活往事。接话要接对方的问题、需要或观点，不靠最后一个名词接出下一段自己的故事。不必人人有类似经历，更不能把每个人的experience_seed排队用完。某段两个人有内容可多聊，旁人可以持续不发言。
+每次想写‘我也有一次’时先确认这段经历给当前对方带来什么；仅证明自己也遇过不必加入。新话题可以无缝插进来，也可以被忽略，不需要造一座名词桥。幽默角色可以认真问、短答或没话说，不承担持续逗笑职责；不用量勺出走、清单审核、衣服诚实一类成套拟人梗维持人设。
 让真实兴趣、个人经历、不同看法和信息差带动长篇。个人经历要有实际发生的事和具体细节，不能只说以前如何、现在如何、所以想明白了什么。不要拿热饭、照片、水杯等任一道具反复更新小状态；一件小事说完就放下。话题回流必须有新内容或新角度，不是提醒它还没完成。别人说生活小事时，不必人人接‘我也’并附一句温柔建议。避免每条都自洽、机智、解释完整；短回应和长叙述由本人动机决定，不机械交替，不强塞错字或无意义噪声。
 创作约束不能变成台词主旨。不要让大家反复讨论个人边界、空闲安排、如何问明白、一次尝试和长期承诺的区别；也不要分析别人一句普通回复、告别或改口背后的态度。两个人有具体事说可以继续，没有新的事实、细节或不同意见就换有内容的话头。知道一个道理不需要每个人轮流举例再总结。每段续写重新查看此前已经聊透的内容，不能把上一段结论换几种说法继续讲。
 任务可以在合适位置完成，只让需要反馈的人说确实做过的动作。材料和代码由坐席先公布；后续群友依上下文表达，不复制同一套全流程汇报。不要替审阅者解释‘只算眼前这一项’‘按公开说明完成’或反复证明不跟风。业务完成后仍由人物兴趣决定接什么话，不强制转成日常专场，不预排结尾总结。
+人物没有被问、没有新的需要时不必宣布参加或拒绝；不能为业务回流插入悬空的立场声明。今晚、约时间、预留空闲等说法须有当前公开聊天中的前因。修订前文后，重新核对后面的‘那我’‘也’‘今晚’等依赖是否还成立，原有业务句也允许移除或重写，不当作不可移动的检查点。
 普通接话不必引用，只有隔着几条容易混淆或针对旧话时才设置回复编号，其余用0。允许话题交错、漏看、暂时不发言；业务事实、人物已知信息和动作因果必须一致，不虚构规则、页面细节或外部结果。仅返回JSON的script数组，台词格式遵循本次要求。
 {format_instructions}"""
 
@@ -55,11 +60,16 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
             if not re.match(r"^\s*\d{3}\|", line):
                 continue
             rolling = run['config'].get('dialogue_flow_version', 1) >= 2
+            media = run['config'].get('dialogue_flow_version', 1) >= 4
             if rolling:
-                parts = line.strip().split('|', 5)
-                if len(parts) != 6:
-                    raise ValueError('新台词需要编号、人物、回复编号、间隔秒、交流阶段和文字六项')
-                number, speaker, reply, delay, stage, text = parts
+                parts = line.strip().split('|', 7 if media else 5)
+                if len(parts) != (8 if media else 6):
+                    raise ValueError('台词需要编号、人物、回复编号、间隔秒、交流阶段、消息类型、图片码和内容八项' if media else
+                                     '新台词需要编号、人物、回复编号、间隔秒、交流阶段和文字六项')
+                if media:
+                    number, speaker, reply, delay, stage, kind, image_code, text = parts
+                else:
+                    number, speaker, reply, delay, stage, text = parts
                 if not delay.isdigit() or not 0 <= int(delay) <= 600 or stage not in STAGES:
                     raise ValueError('消息间隔需为0至600秒，交流阶段需为寒暄暖场、了解群用途或自然群聊')
             else:
@@ -73,11 +83,12 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
                 raise ValueError(f"消息{seq}使用了未设置的人物：{speaker}")
             if reply_to is not None and not 0 < reply_to < seq:
                 raise ValueError(f"消息{seq}回复了尚未出现的消息")
-            if not text.strip() or len(text.strip()) > message_char_limit(run["config"].get("language"), seat=speaker == "坐席"):
+            payload = decode_media(kind, image_code, text) if media else {'type': '文本', 'content': text.strip(), 'image_code': None, 'image_mode': None}
+            if (not payload['content'] and payload['type'] != '图片') or len(payload['content']) > message_char_limit(run["config"].get("language"), seat=speaker == "坐席"):
                 raise ValueError(f"消息{seq}为空或超出单条长度")
             declined = speaker != "坐席" and explicit_refusal(text, run["config"].get("language")) is True
-            messages.append({"seq": seq, "sender": speaker, "content": text.strip(), "reply_to": reply_to,
-                             "type": "文本", "delay": delay, "image_code": None, "image_mode": None,
+            messages.append({"seq": seq, "sender": speaker, **payload, "reply_to": reply_to,
+                             "delay": delay,
                              "replace_date": None, "source_seq": None, "source_row": None,
                              "source_rows": [], "reply_source_seq": None, "stage": stage,
                              "reaction": "refuse" if declined else "continue", "task_state": "declined" if declined else "active", "performed_steps": []})
@@ -129,8 +140,13 @@ def writing_contract(template: dict, run: dict) -> str:
         "不要让所有人轮流汇报同一步骤，不要反复复述风险或已解决的问题，不要新增未经母本支持的活动。"
         f"最终恰好{target}条消息，先由坐席打招呼；结尾可由任何人接话，不需要坐席作总结。"
         "不要把原始账号人数或逐人发言覆盖当成目标；目标完成和自然接话优先。"
-        "条数由有内容的交流支撑，不为凑数延长动作、回收笑点或重复等待；任务完成不等于必须进入日常话题专场。"
-        "文字消息不含图片素材，禁止用[已完成截图]之类假图片占位符；可以用文字说明已分享截图。"
+        "条数由有内容的交流支撑，不为凑数延长动作、回收笑点或重复等待；任务完成不等于必须进入日常话题专场。" +
+        ("截图必须是一条独立图片消息或图片+文本消息，带SCREENSHOT_开头的素材码；"
+         "这是剧本待补素材事件，不是真实截图，不把素材标记写成角色台词。"
+         "给指定商品点赞后、按母本要求在群里发截图时生成该图片事件；后文才能说已发群。"
+         "纯文字说已经分享不代替图片事件，图片也计入总条数。普通群聊仍用文本，文本图片码用-。"
+         if run['config'].get('dialogue_flow_version', 1) >= 4 else
+         "文字消息不含图片素材，禁止用[已完成截图]之类假图片占位符；可以用文字说明已分享截图。") +
         "不要让人物说‘不虚构结果’‘公开说明的动作’‘活动文本提到’等创作/审阅用语，直接像真人接话。"
         "参与者的私有判断只属于本人，其他人只能依据已公开的话回应。不要输出角色内心、制作解释或旁白。"
         "\n" + opening_requirement(run) + "\n" + json.dumps(context, ensure_ascii=False)
@@ -150,8 +166,31 @@ class RecordedChat:
         run.setdefault("vimax_calls", []).append({"stage": self.stage, "seconds": round(time.monotonic()-began, 2),
                                                  "model": self.chat.model_name, "reasoning_effort": self.chat.reasoning_effort})
         run.setdefault("vimax_raw", {})[self.stage] = response.content
+        if run['config'].get('dialogue_flow_version', 1) >= 4:
+            run.setdefault('vimax_samples', []).append({'stage': self.stage, 'call': len(run['vimax_calls']),
+                                                       'content': response.content})
         self.api.save_run(run)
         return response
+
+
+def output_format(run):
+    if run['config'].get('dialogue_flow_version', 1) >= 4:
+        return ('八项格式NNN|人物|回复编号或0|间隔秒|交流阶段|消息类型|图片码或-|内容。'
+                '文本的图片码填-；图片或图片+文本必须有SCREENSHOT_开头的唯一素材码。'
+                '图片行内容可空，图片+文本的内容是本人实际附言，不写舞台说明。'
+                '例如001|坐席|0|4|寒暄暖场|文本|-|大家好。')
+    if run['config'].get('dialogue_flow_version', 1) >= 2:
+        return '六项格式NNN|人物|回复编号或0|间隔秒|交流阶段|文字，例如001|坐席|0|4|寒暄暖场|大家好。'
+    return '四项格式NNN|人物|回复编号或0|文字。'
+
+
+def checkpoint_candidate(api, run, messages, reason):
+    if run['config'].get('dialogue_flow_version', 1) < 4:
+        return
+    latest = api.get_run(run['id'])
+    archive_candidate(api.DATA_DIR, latest, messages, reason)
+    api.save_run(latest)
+    run['candidate_versions'] = latest.get('candidate_versions', [])
 
 
 async def process(session_id, api):
@@ -196,9 +235,9 @@ async def process(session_id, api):
                     request = contract + '\n仅续写本段，不重写已生成台词。读取public_history保持事实连续；private_by_owner里的个人处境未公开前仅本人知道。'
                     request += '\n' + json.dumps(rolling_context(run, history), ensure_ascii=False)
                     request += f'\n本段恰好{count}条，从{start:03d}至{start+count-1:03d}。总篇幅{target}条，剩余{target-len(history)}条。'
+                    request += output_format(run)
                     request += ('总条数不代表每个人都要发言。根据话题与本人关注选择发言者，不轮流点名，不让没人回应的话硬被接住。'
-                                '台词格式NNN|人物|回复编号或0|间隔秒|阶段|文字；间隔按输入长度、停顿与忙自己的事自然变化，'
-                                '阶段为寒暄暖场、了解群用途、自然群聊。示例001|坐席|0|4|寒暄暖场|大家好呀。'
+                                '间隔按输入长度、停顿与忙自己的事自然变化，阶段为寒暄暖场、了解群用途、自然群聊。'
                                 '引用回复只在确有指向需要时使用，普通接话用0。'
                                 '只剩本段时保证愿意者已完成母本目标；可有普通接话结尾，不必坐席总结。')
                     for attempt in range(2):
@@ -229,6 +268,7 @@ async def process(session_id, api):
                     run = latest
                 run['review_progress']['phase'] = 'validate'
                 api.save_run(run)
+                checkpoint_candidate(api, run, history, '首次完整写作，尚待程序与人工检查')
             elif not run.get('vimax_draft'):
                 writer = writer_type(chat_model=RecordedChat(chat, api, session_id, "write"))
                 run["review_progress"]["phase"] = "writing"
@@ -331,6 +371,7 @@ async def process(session_id, api):
                 rebuild_memories(run)
                 run["memory_reflections"] = normalize_reflections(run, [], review.get("memory_reflections"))
             run["review_progress"]["phase"] = "done"
+            checkpoint_candidate(api, run, run['messages'], '最终程序检查结束；人工审阅另行记录')
             api.save_run(run)
     except asyncio.CancelledError:
         raise
@@ -345,6 +386,7 @@ async def process(session_id, api):
 def contract_errors(source, run):
     # Account coverage is not the content objective; the cast is freely configured.
     errors=[error for error in validate_run(source, run) if not error.endswith("没有发言")]
+    errors.extend(screenshot_errors(source, run))
     policy = run.get('config', {}).get('opening_policy')
     if run.get('config', {}).get('dialogue_flow_version', 1) >= 2:
         errors.extend(flow_errors(run.get('messages', []), source_literals(source), run.get('status') == 'completed'))
@@ -401,18 +443,23 @@ async def revise(writer_type, chat, api, session_id, template, run, issues, reas
         request += ('这些人物处境、动机和关系设定不是已公开事实，只约束所属人物自己的选择；'
                     '其他人只能依据修订后该条之前已经公开的台词回应，不能读取他人私有动机，'
                     '也不能把原稿后段才出现的消息提前当作已知。')
-    request += "\n原对话："+json.dumps([{k:m[k] for k in ['seq','sender','reply_to','delay','stage','content']} for m in messages],ensure_ascii=False)
-    request += ('\n本次明确使用六项新版格式。' if run['config'].get('dialogue_flow_version', 1) >= 2 else '\n本次明确使用四项旧版格式。')
-    request += "\n在script数组内返回完整修订稿，新版格式NNN|人物|回复编号或0|间隔秒|交流阶段|台词，旧版仍用四项。允许调整问题段的发言人和接话关系；其他有效内容尽量保留。可以补入母本原值，但不能添加未知原值或改变业务含义。连续重复的问题要重写整段，不能只换近义词。"
+    request += "\n原对话："+json.dumps([{k:m.get(k) for k in ['seq','sender','reply_to','delay','stage','type','image_code','image_mode','content']} for m in messages],ensure_ascii=False)
+    request += '\n' + output_format(run)
+    request += "\n在script数组内返回完整修订稿。允许调整问题段的发言人和接话关系；其他有效内容尽量保留。可以补入母本原值，但不能添加未知原值或改变业务含义。连续重复的问题要重写整段，不能只换近义词。修改旧话后须检查后续代词、个人决定、时间安排是否仍有前因；不要只修被点名的一句却留下后续悬空回应。"
     scenes = await writer.write_script_based_on_story(run.get('vimax_story',''),request,system_prompt=WRITE_PROMPT)
     latest=api.get_run(session_id)
     run['vimax_calls']=latest.get('vimax_calls',[])
     run['vimax_raw']=latest.get('vimax_raw',{})
     updated = decode_scenes(scenes,run)
+    checkpoint_candidate(api, run, updated, '完整修订：' + reason)
     if run['config'].get('dialogue_flow_version', 1) >= 2:
         run['schedule'] = [{**slot, 'stage': updated[i]['stage']} for i, slot in enumerate(run['schedule'])]
     errors=contract_errors(template['source'],{**run,'messages':updated,'status':'completed'})
     if errors:
         raise ValueError('修订稿仍未通过：'+'；'.join(errors))
     run['messages']=updated
-    return [{'seq':m['seq'],'before':original[m['seq']]['content'],'after':m['content']} for m in updated if m['content']!=original[m['seq']]['content'] or m['sender']!=original[m['seq']]['sender']]
+    return [{'seq':m['seq'],'before':original[m['seq']]['content'],'after':m['content'],
+             'before_media': {k: original[m['seq']].get(k) for k in ('type','image_code','image_mode')},
+             'after_media': {k: m.get(k) for k in ('type','image_code','image_mode')}}
+            for m in updated if any(m.get(k) != original[m['seq']].get(k)
+                                    for k in ('content','sender','reply_to','delay','stage','type','image_code','image_mode'))]

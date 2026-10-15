@@ -23,7 +23,7 @@ def rolling_context(run: dict, history: list[dict]) -> dict:
             'last_nonactive_choice': choices[-1]['task_state'] if choices else 'unknown',
             'past_experience': session.get('long_term_memory', [])[:4],
         }
-    context = {'public_history': [{k: m[k] for k in ('seq', 'sender', 'content', 'reply_to', 'stage')} for m in history],
+    context = {'public_history': [{k: m.get(k) for k in ('seq', 'sender', 'content', 'reply_to', 'stage', 'type', 'image_code', 'image_mode')} for m in history],
             'private_by_owner': states, 'threads': run.get('conversation_threads', []),
             'current_stage': history[-1]['stage'] if history else STAGES[0]}
     if run['config'].get('dialogue_flow_version', 1) >= 3:
@@ -32,6 +32,8 @@ def rolling_context(run: dict, history: list[dict]) -> dict:
             'relationship_baseline': '陌生群友，熟悉程度只依据已有公开互动；不要让所有人立即互相照料。',
             'recurrence_candidates': repeated_passages(history),
             'continuation_check': '对照全文，问题有答案就不重新教学；再次提起旧话题必须带来新事实、不同观点或个人需要。',
+            'social_check': '不要把别人的最后一个名词当成下一个故事的邀请；熟悉程度只按已经实际发生的公开交流判断。',
+            'dependency_check': '参加/拒绝、今晚安排、那我/我也等回应必须有当时的前因；无新触发不发布立场公告。',
         }
     return context
 

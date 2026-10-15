@@ -556,7 +556,7 @@ async def start_simulation(config: SimulationConfig) -> dict:
         raise HTTPException(422, str(exc)) from exc
     normalized_config = config.model_dump()
     normalized_config['opening_policy'] = opening_policy(config.target_messages)
-    normalized_config['dialogue_flow_version'] = 3
+    normalized_config['dialogue_flow_version'] = 4
     schedule = opening_schedule(schedule, normalized_config['opening_policy'])
     normalized_config["reasoning_effort"] = model_reasoning_effort(normalized_config)
     roles = ["坐席"] + template["source"]["accounts"] + [f"客户{i + 1}" for i in range(config.customer_count)]
@@ -775,6 +775,11 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "热饭到收拾餐盒、挑照片到擦杯子等主题即使每条不同，也不能仅靠微小动作变化撑篇幅。"
         "结合persona_cards检查不同人物的关注点、判断和接话意愿，不用名人腔或口头禅衡量人格。"
         "检查是否每次提问都被群友夸赞、每句玩笑都获捧场、各人操作汇报可以互换署名；引用两处以上证据再判断模式。"
+        "检查故事接龙：前一人说钥匙、后一人接遥控器、再接书架和菜谱，即便每段故事不同，"
+        "若只是抓前一句名词轮流提供自己经历、没有回应对方实际需要或判断，也应指出成段编排感。"
+        "初入群陌生人的熟悉须由公开互动逐步建立，不应迅速变成人人分享完整私事的闲聊会。"
+        "幽默卡不代表必须持续造梗；连续拟人比喻或固定捧哏须引用多处证据，不因偶尔一句玩笑报错。"
+        "检查参加/拒绝声明、今晚安排和告别等是否有当时的前因，不因它能回流业务就放过悬空回应。"
         "opening_contract规定寒暄再了解群用途，转场由实际交流产生，不固定条号。"
         "对新版rolling_conversation检查安排感：多个群友逐项见证同一个人操作、把动作拆成准备做正在做已做、"
         "角色反复解释自主性或互相称赞理性、已经解决的问题无新背景又重问，都应引用具体台词标出。"
@@ -816,8 +821,13 @@ async def review_dialogue(template: dict, run: dict) -> dict:
          "style_findings": style_findings(run["messages"], run["config"].get("language"))[:12],
          "code_origin_rule": "固定代码由坐席提供，参与者将其与截图发给指定联系人；不要编造页面显示或生成该代码。",
          "submission_order_policy": "截图先发群，再连同代码发给经理" if group_screenshot_required(template["source"]) else "按母本流程提交",
+         "media_policy": ("本版支持图片素材占位事件。type、image_code及image_mode为剧本的待补素材元数据，不是真实外部截图。"
+                          "母本需截图发群时，要有该参与者自己的图片消息；不能只凭纯文本已发截图认定群内图片事件发生。"
+                          "图片事件也必须在公开说明与点赞之后，素材码不能当作新的业务代码。"
+                          if run['config'].get('dialogue_flow_version', 1) >= 4 else None),
          "workflow_steps": template["analysis"].get("workflow_steps") or analyze(template["source"])["workflow_steps"],
-         "messages": [{"seq": m["seq"], "sender": m["sender"], "stage": m["stage"], "content": m["content"]}
+         "messages": [{"seq": m["seq"], "sender": m["sender"], "stage": m["stage"], "content": m["content"],
+                       "type": m.get("type"), "image_code": m.get("image_code"), "image_mode": m.get("image_mode")}
                       for m in run["messages"]]}, temperature=0.1,
         model_name=os.getenv("MODEL_REVIEW_NAME"), call_budget_seconds=180)
     issues = result.get("issues", [])
