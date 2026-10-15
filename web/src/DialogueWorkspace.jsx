@@ -26,9 +26,15 @@ async function api(path, options = {}) {
 const steps = ['导入母本', '确认目标', '设置角色', '模拟对话']
 
 export function archiveLabel(run) {
-  const human = ({ candidate: '人工候选', alternative: '表达备选', needs_revision: '人工需修订' })[run?.publication?.human_verdict] || '历史版本'
-  const program = ({ deferred: '模型全文复核未执行', reviewed: '模型已全文复核', not_completed: '模型审阅未完成' })[run?.publication?.program_review_state] || '模型审阅状态未记录'
-  return `${run?.publication?.version || ''} · ${human} · ${program}${run?.status === 'failed' ? ' · 程序未通过' : ''}`
+  const publication = run?.publication || {}
+  const independent = publication.method === 'independent_generation'
+    || publication.series?.startsWith('独立随机-')
+    || run?.version_record?.method === 'independent_generation'
+    || run?.independence?.method === 'independent_generation'
+  const human = publication.review_label || (independent ? '待完整审阅'
+    : ({ candidate: '人工候选', alternative: '表达备选', needs_revision: '人工需修订' })[publication.human_verdict] || '历史版本')
+  const program = ({ deferred: '模型全文复核未执行', reviewed: '模型已全文复核', not_completed: '模型审阅未完成' })[publication.program_review_state] || '模型审阅状态未记录'
+  return `${publication.display_label || publication.version || ''} · ${human}${publication.user_selected === true ? ' · 用户已选' : ''} · ${program}${run?.status === 'failed' ? ' · 程序未通过' : ''}`
 }
 
 export function ArchiveReviewNotice({ run }) {

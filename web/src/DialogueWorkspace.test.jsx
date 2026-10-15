@@ -63,6 +63,34 @@ describe('creation memory options', () => {
 })
 
 describe('archived evolution histories', () => {
+  it('uses explicit review labels and marks a user choice only for the boolean flag', () => {
+    const run = {...paused, publication: {...paused.publication, method: 'independent_generation',
+      series: '独立随机-20261015', display_label: '独立01', human_verdict: 'candidate',
+      review_label: '完整双审候选', program_review_state: 'reviewed', selected: true}}
+    const label = archiveLabel(run)
+    const html = renderToStaticMarkup(<span>{label}</span>)
+    expect(label).toBe('独立01 · 完整双审候选 · 模型已全文复核')
+    expect(html).toContain('完整双审候选')
+    expect(html).not.toContain('人工候选')
+    expect(html).not.toContain('用户已选')
+    for (const user_selected of [false, 'true', 1, undefined]) {
+      expect(archiveLabel({...run, publication: {...run.publication, user_selected}})).not.toContain('用户已选')
+    }
+    const selected = {...run, publication: {...run.publication, user_selected: true}}
+    expect(renderToStaticMarkup(<span>{archiveLabel(selected)}</span>)).toContain('完整双审候选 · 用户已选')
+  })
+  it('does not infer complete review for a new series without a review label', () => {
+    const run = {...paused, publication: {...paused.publication, series: '独立随机-20261015', human_verdict: 'candidate'}}
+    expect(renderToStaticMarkup(<span>{archiveLabel(run)}</span>)).toContain('待完整审阅')
+    expect(archiveLabel(run)).not.toContain('人工候选')
+    const byMethod = {...run, publication: {...run.publication, series: undefined},
+      version_record: {method: 'independent_generation'}}
+    expect(archiveLabel(byMethod)).toContain('待完整审阅')
+  })
+  it('keeps original candidate labels for legacy histories', () => {
+    const run = {...paused, publication: {...paused.publication, human_verdict: 'candidate', selected: true}}
+    expect(archiveLabel(run)).toBe('V06 · 人工候选 · 模型全文复核未执行')
+  })
   it('separates human alternatives from deferred program review and unknown goal', () => {
     expect(archiveLabel(paused)).toBe('V06 · 表达备选 · 模型全文复核未执行')
     const html = renderToStaticMarkup(<ArchiveReviewNotice run={paused} />)
