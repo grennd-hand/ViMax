@@ -58,7 +58,19 @@ function CharacterMemory({ run, name, session }) {
 
 function EventPlan({run}) {
   if (!run.vimax_events?.length) return null
-  return <Card eyebrow="本轮规划" title="对话安排"><p className="muted">以下是计划发生的交流。实际进展以群聊中说出和完成的内容为准。</p><details className="story-arc"><summary>查看 {run.vimax_events.length} 个事件</summary><ol>{run.vimax_events.map(event => <li key={event.index}><strong>{event.description}</strong><small>第 {event.message_start}—{event.message_end} 条 · {event.roles.join('、')}</small><p>起因：{event.cause}</p><p>{event.process_chain.join(' → ')}</p><p>变化：{event.outcome}</p></li>)}</ol></details></Card>
+  const organic = run.config?.dialogue_flow_version >= 3
+  return <Card eyebrow="本轮规划" title={organic ? '交流素材' : '对话安排'}>
+    <p className="muted">{organic ? '以下是可选话题，可交错展开，也可以不使用。实际进展以群聊内容为准。' : '以下是计划发生的交流。实际进展以群聊中说出和完成的内容为准。'}</p>
+    <details className="story-arc"><summary>查看 {run.vimax_events.length} 个{organic ? '话题' : '事件'}</summary>
+      <ol>{run.vimax_events.map(event => <li key={event.index}>
+        <strong>{event.description}</strong>
+        <small>{Number.isInteger(event.message_start) && Number.isInteger(event.message_end) ? `第 ${event.message_start}—${event.message_end} 条 · ` : ''}{event.roles.join('、')}</small>
+        {event.trigger && <p>聊起条件：{event.trigger}</p>}
+        <p>起因：{event.cause}</p><p>{event.process_chain.join(' → ')}</p><p>变化：{event.outcome}</p>
+        {event.stop_when && <p>停止条件：{event.stop_when}</p>}
+      </li>)}</ol>
+    </details>
+  </Card>
 }
 
 export default function DialogueWorkspace({ runId, startFresh = false, selectionVersion = 0, onRunChanged }) {
