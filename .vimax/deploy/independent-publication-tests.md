@@ -19,7 +19,7 @@
 
 ## 离线验证结果
 
-- 新suite **44项通过**（含继承的旧兼容用例）；原导入/发布安全suite **55项通过**。
+- 新suite **50项通过**（含继承的旧兼容用例）；原导入/发布安全suite **55项通过**。
 - 实际SQLite fixture验证52条原run_json字符串、原索引项和active不变，新独立V01两次导入完全一致；未访问线上52条记录。
 - 覆盖旧V01–V03/演进/revision兼容；独立revision父None；双审hash/缺失快照/继承上下文/错误人格计划/空语料拒绝；paused真实合同检查；failed完整稿不改状态；selected必须实际goal_met=true/issues=[]；无selected默认；V01也核对人工与模型状态。
 - 覆盖tar路径越界/绝对路径/软链接/重复成员/大小写碰撞/额外文件/文件SHA/tar SHA拒绝，且验证失败前没有staging；相同归档重试与冲突不覆盖；fake SSH实际只调用一次put；同容器两遍保持原列表顺序；语料安装/同稿复用/拒覆盖/仅新文件恢复hook。宿主脚本通过Python3.6语法检查，批量subprocess使用兼容参数。
@@ -57,13 +57,33 @@ prestage是服务器归档写入，不是本地dry-run；candidate写隔离服�
 
 ## 源文件SHA256
 
-- publish-independent-safe.py：`f73339762852c15d832134494afc09b9dcec58b8c5b0261af6a46bb244749527`
-- test-independent-publish-safety.py：`08ed6340fff3a3f8c952599993fad3aa939214d7310b3d1182fa11975ef4d62a`
-- import-natural-dialogue.py：`cb3adf2a07905467e24e4d03606e8b0586445b9e26659b4914d5a277fca20480`
+- publish-independent-safe.py：`ac2510b79b61b55ad381864d086dddc0bb2b850fe548312204cc8ad7d20b0339`
+- test-independent-publish-safety.py：`baa7222ef32b41934b40bc8a406f13b4585b4cf0b1fe137568c7aeaf6b18f94b`
+- import-natural-dialogue.py：`eb4065261884e454072276b0dcd4af521aee86f8c6a22747aa5176db53125323`
+
+## 虚构示例／内部排练标识
+
+仅当原run.config.usage_context=`fictional_rehearsal`时，importer生成的messages.md在原150条正文前增加指定UTF-8前言：`# 虚构示例／内部排练稿`，空行后为`人物及行为为虚构情节，不代表真实参与记录。`再空行接原文。旧配置没有此值时导出字节完全不变；不改原run、台词或源归档MD。新增回归同时检查完整前缀字节、新稿原正文一致及已导入旧稿MD保持原样。core.export_xlsx由root另行处理，本次没有改它。
+
+## 最后一次模型调用与当前终稿绑定修复
+
+仅独立series新增`independent_review_state`：保留明确deferred标记；非deferred只有最后一项state=returned、messages_sha256等于当前canonical消息hash、message_count及实际消息数均150，且有review对象，才标reviewed；其他情况均not_completed。先前returned记录或outcome_review.met残留不参与判定。用户已选还要求这条绑定记录goal_met=true及显式issues=[]。旧演进/旧V01–V03判定保持原分支不变。
+
+Publisher verify_state直接调用包内冻结importer的相同函数，避免另写bool(history)推导而漂移。新增actual-shaped离线回归覆盖：早先成功但最后连接/格式失败、残留outcome为true、最后hash错/149条/started，以及target错误标reviewed时被publisher拒绝。成功但存在实质issues仍可如实标“已全文复核”，不等于程序通过。
+
+实际V14仅只读验证：原run SHA `41b908509521943514b97ce0ff5fbc3ad932145ac1cc6ebc1fe36118fe0befdf`，failed/150、最后state=failed，新的派生状态为not_completed；原run字节未变，原outcome_review.met=true残留也未改写。没有导入或修饰V14源稿。UI必须以该真实program_review_state约束终稿结论显示，不把保留的旧outcome误当终态审阅通过。
+
+## 审核源码快照的精确白名单修复
+
+真实hashes包含`sources/.vimax/deploy/evolve-natural.py`与`sources/.vimax/deploy/generate-independent.py`。这两个完整路径现在明确放行，同时支持包内V01或V14-R001等完整label前缀；其他隐藏目录、其他.vimax下文件、私钥配置yaml、越界/链接规则均不放宽。rglob文件收集、tar验证与服务端精确清单验证使用同一规则，源码可原样随包恢复。新增测试覆盖两份源码原字节穿过revision前缀tar安装，以及近似路径/私有yaml依然拒绝；prepare fixture也加入真实形状的source路径及其hash，避免再次用不完整fixture掩盖问题。
+
+按root给定参数实际只读执行：`collect_files(root, arguments('20261015-3702d77','20261015-333ee74',['V01','V14'],None))`，结果通过，共127文件；V01与V14各自两份审核源码都保留。两稿均failed/150、最后调用failed，派生program_review_state=not_completed。V01 run SHA `8865a6dcf57e4b5ae40273273104baf6b65af13f78969a5d494eec2e85ad0c20`；V14 SHA见上。两稿run.json、hashes.json及这四份源码的前后字节SHA一致。没有运行prepare、没有创建发布tar、没有数据库/网络/服务器操作。
+
+最终再次只读核验仍为127文件：YAML/YML=0，SQLite/DB/WAL/缓存/锁/runtime=0；全部含隐藏目录的文件仅上述4份精确白名单审核源码，没有其他.vimax内容或私有配置。
 
 ## 当前已知限制
 
-- 真实新系列稿尚未全批注册，因此尚未执行真实新稿prepare/离线全批导入；当前证据为真实10,000段corpus只读校验与隔离fixture/fake SSH测试。没有实机传输速度或发布成功结论。
+- 真实新系列稿尚未全批注册，因此尚未执行真实新稿prepare/离线全批导入；当前证据包含真实V01/V14只读文件收集、10,000段corpus只读校验与隔离fixture/fake SSH测试。没有实机传输速度或发布成功结论。
 - Python3.6是语法与兼容参数检查，尚未在宿主3.6运行新helper；真正import模块运行于新backend镜像的Python3.12。
 - 固定为同一份运行语料产物；已存在不同字节的runtime corpus会拒绝覆盖。需要更新语料时必须另外审查更新/恢复策略，不绕过拒绝。
 - --selected仅是明确用户选择的CLI入口，本helper不能替用户作选择；默认None。语义独立、40个正式family去重及审阅真实性由register/finalize与实际全文检查负责。

@@ -23,6 +23,24 @@ def is_independent(run):
             or (run.get('independence') or {}).get('method') == 'independent_generation')
 
 
+def independent_review_state(run, fingerprint=None):
+    """Only the last actual returned call can certify this exact full draft."""
+    if run.get('program_review_deferred') is True:
+        return 'deferred'
+    messages = run.get('messages') or []
+    if fingerprint is None:
+        fingerprint = hashlib.sha256(canonical([{key: message.get(key) for key in MESSAGE_FIELDS}
+                                                for message in messages]).encode()).hexdigest()
+    history = run.get('program_review_history') or []
+    last = history[-1] if history else {}
+    if (isinstance(last, dict) and last.get('state') == 'returned'
+            and last.get('messages_sha256') == fingerprint
+            and last.get('message_count') == len(messages) == 150
+            and isinstance(last.get('review'), dict)):
+        return 'reviewed'
+    return 'not_completed'
+
+
 def independent_evidence(run, version):
     """Check preserved fresh-run evidence, not a claim of semantic uniqueness."""
     family, revision = version_parts(version)
@@ -128,8 +146,12 @@ def publication_metadata(run, source_directory, version, selected, source_sha256
         assert not run.get('errors') and not checks, 'Deferred candidate failed actual full-draft contracts'
     if selected:
         assert review['verdict'] == 'candidate' and not deferred and history, 'Selected evolution needs human acceptance and an actual full model review'
+        if is_independent(run):
+            assert independent_review_state(run, fingerprint) == 'reviewed', 'Selected independent review is not returned and bound to this full draft'
         last_review = history[-1].get('review', {})
         assert last_review.get('goal_met') is True and not last_review.get('issues'), 'Selected model review did not pass'
+        if is_independent(run):
+            assert last_review.get('issues') == [], 'Selected independent review must return an explicit empty issues list'
     metadata = {'read_only': True, 'version': version, 'selected': selected,
             'source_run_sha256': source_sha256, 'message_sha256': fingerprint,
             'human_verdict': review['verdict'], 'human_summary': review['summary'],
@@ -139,6 +161,7 @@ def publication_metadata(run, source_directory, version, selected, source_sha256
     metadata.update(correction_metadata(source_directory, version, source_sha256))
     if is_independent(run):
         metadata.update(independent_evidence(run, version))
+        metadata['program_review_state'] = independent_review_state(run, fingerprint)
         metadata['review_label'] = {'candidate': '完整双审候选', 'alternative': '表达备选',
                                     'needs_revision': '需修订'}[review['verdict']]
         if run['status'] == 'failed': metadata['review_label'] = '需修订'
@@ -276,6 +299,9 @@ def main():
         'messages.md': '\n\n'.join(f"{m['seq']} **{m['sender']}**：{m['content']}" for m in run['messages']).encode(),
         'messages.xlsx': export_xlsx(run),
     }
+    if run['config'].get('usage_context') == 'fictional_rehearsal':
+        artifacts['messages.md'] = ('# 虚构示例／内部排练稿\n\n人物及行为为虚构情节，不代表真实参与记录。\n\n'.encode('utf-8')
+                                   + artifacts['messages.md'])
     assert (root / '.vimax/sessions.json').is_file(), 'Existing session index required'
     assert Path(args.db).is_file(), 'Existing database required'
     index = SessionIndex(root)

@@ -78,7 +78,11 @@ def safe_name(name):
     assert isinstance(name, str) and name and '\\' not in name and ':' not in name, 'Unsafe archive path'
     path = PurePosixPath(name)
     assert not path.is_absolute() and str(path) == name, 'Noncanonical archive path'
-    assert all(part not in ('.', '..') and not part.startswith('.') for part in path.parts), 'Private/escaping archive path'
+    audited_source = re.fullmatch(
+        r'(?:V(?:0[1-9]|[123][0-9]|40)(?:-R[0-9]{3,})?/)?sources/\.vimax/deploy/'
+        r'(?:evolve-natural|generate-independent)\.py', name)
+    assert all(part not in ('.', '..') and (not part.startswith('.')
+               or part == '.vimax' and audited_source) for part in path.parts), 'Private/escaping archive path'
     assert not any(part in ('__pycache__', 'node_modules') for part in path.parts), 'Runtime archive path'
     assert not path.name.endswith(('.pyc', '.lock', '.sqlite', '.sqlite3', '.sqlite3-wal', '.sqlite3-shm', '.db', '.tmp')), 'Runtime archive file'
     assert path.name not in ('runtime-model.yaml', 'agent.local.yaml', 'release.env', 'access.env'), 'Private configuration'
@@ -258,6 +262,7 @@ def batch_import(archive, root, versions, selected, repeats):
 
 def configure_base(plan, mode, directory):
     base = load_module('frozen_independent_transaction', directory / 'publish-natural-base.py')
+    importer = load_module('frozen_independent_review_evidence', directory / 'import-run.py')
     original_verify, original_restore, original_runtime = base.verify_state, base.restore, base.verify_runtime
     # The legacy constructor requires a value; no operation runs until its
     # SELECTED is explicitly replaced with the optional user choice below.
@@ -304,8 +309,7 @@ def configure_base(plan, mode, directory):
             review = json.loads((base.ARCHIVE / version / 'review-index.json').read_text(encoding='utf-8'))
             assert publication['human_verdict'] == review['verdict']
             assert publication['style_label'] == source['creative_variation']['style_label']
-            state_label = ('deferred' if source.get('program_review_deferred') is True
-                           else 'reviewed' if source.get('program_review_history') else 'not_completed')
+            state_label = importer.independent_review_state(source)
             assert publication['program_review_state'] == state_label
     def restore(snapshot_path, old):
         original_restore(snapshot_path, old)

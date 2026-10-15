@@ -38,6 +38,12 @@ def corpus_bytes():
                            'attributions': [{'source_id': 'fixture-source'}]}]})
 
 
+def returned_review(value, review):
+    wording = [{key: message.get(key) for key in imp.MESSAGE_FIELDS} for message in value['messages']]
+    return {'state': 'returned', 'messages_sha256': pub.sha(imp.canonical(wording).encode()),
+            'message_count': len(value['messages']), 'review': review}
+
+
 def evidence(value):
     value.setdefault('version_record', {})
     value['version_record'].update(method='independent_generation', series=pub.SERIES, parent_run=None)
@@ -110,6 +116,34 @@ class IndependentImportSafety(legacy.EvolutionImportSafety):
         with self.assertRaisesRegex(AssertionError, 'requires archived snapshots'): self.invoke()
         self.assertEqual(len(legacy.publisher.database_rows(self.root / '.vimax')), 1)
 
+    def test_markdown_discloses_fictional_rehearsal_only_when_configured(self):
+        value = self.independent_fixture()
+        self.invoke()
+        path = self.root / '.working_dir' / ('dialogue-' + value['id']) / 'dialogue/messages.md'
+        original = path.read_bytes()
+        expected = '\n\n'.join(f"{message['seq']} **{message['sender']}**：{message['content']}" for message in value['messages']).encode('utf-8')
+        self.assertEqual(original, expected)
+        # A different isolated target receives the new configuration, without
+        # changing the source/identity of the already imported old artifact.
+        value['id'] = 'f' * 32
+        value['config']['usage_context'] = 'fictional_rehearsal'
+        value['candidate_versions'] = []
+        self.save_independent(value)
+        payloads = []
+        write = imp.atomic_write
+        def capture(path, payload):
+            if path.name == 'messages.md': payloads.append(payload)
+            return write(path, payload)
+        # Snapshot enforcement was separately verified; preserve its call here
+        # while using this case only to compare the exported byte contract.
+        value['candidate_versions'] = [{'fixture': True}]
+        self.save_independent(value)
+        with patch.object(imp, 'prepare_snapshots', return_value=[]), patch.object(imp, 'atomic_write', side_effect=capture):
+            self.invoke()
+        prefix = '# 虚构示例／内部排练稿\n\n人物及行为为虚构情节，不代表真实参与记录。\n\n'.encode('utf-8')
+        self.assertEqual(payloads, [prefix + expected])
+        self.assertEqual(path.read_bytes(), original)
+
     def test_independent_revision_is_fresh_parentless_attempt_and_keeps_full_label(self):
         value = self.independent_fixture(label='V01-R001')
         self.invoke(); self.invoke()
@@ -129,17 +163,47 @@ class IndependentImportSafety(legacy.EvolutionImportSafety):
 
     def test_independent_selected_requires_actual_full_model_acceptance(self):
         value = self.independent_fixture(status='completed')
-        value['program_review_history'] = [{'review': {'goal_met': False, 'issues': ['real model rejection']}}]
+        value['program_review_history'] = [returned_review(value, {'goal_met': False, 'issues': ['real model rejection']})]
         review_path = self.run_path.parent / 'review-index.json'; review = json.loads(review_path.read_bytes())
         review['verdict'] = 'candidate'; review_path.write_text(json.dumps(review), encoding='utf-8')
         hashes_path = self.run_path.parent / 'hashes.json'; hashes = json.loads(hashes_path.read_bytes())
         hashes['review-index.json'] = pub.sha(review_path.read_bytes()); hashes_path.write_text(json.dumps(hashes), encoding='utf-8')
         self.save_independent(value); self.argv.append('--selected')
         with self.assertRaisesRegex(AssertionError, 'model review did not pass'): self.invoke()
-        value['program_review_history'][0]['review'] = {'goal_met': True, 'issues': []}; self.save_independent(value)
+        good = returned_review(value, {'goal_met': True, 'issues': []})
+        for changes in ({'state': 'failed'}, {'messages_sha256': '0' * 64}, {'message_count': 149}):
+            value['program_review_history'] = [{**good, **changes}]; self.save_independent(value)
+            with self.assertRaisesRegex(AssertionError, 'not returned and bound'): self.invoke()
+        value['program_review_history'] = [good]; self.save_independent(value)
         self.invoke(); self.invoke()
         saved = json.loads(legacy.publisher.database_rows(self.root / '.vimax')[value['id']])
         self.assertTrue(saved['publication']['selected']); self.assertEqual(saved['status'], 'completed')
+
+    def test_actual_shaped_final_call_failure_does_not_reuse_earlier_success_or_outcome(self):
+        value = self.independent_fixture(status='failed')
+        earlier = returned_review(value, {'goal_met': True, 'issues': []})
+        earlier['messages_sha256'] = '1' * 64
+        final = returned_review(value, {})
+        final.pop('review'); final.update(state='failed', error='RuntimeError: model connection or response format failed')
+        value.update(program_review_history=[earlier, final], outcome_review={'met': True, 'reason': 'stale earlier result'})
+        self.save_independent(value); self.invoke(); self.invoke()
+        saved = json.loads(legacy.publisher.database_rows(self.root / '.vimax')[value['id']])
+        self.assertEqual(saved['publication']['program_review_state'], 'not_completed')
+        self.assertEqual(saved['program_review_history'], value['program_review_history'])
+        self.assertEqual(saved['outcome_review'], value['outcome_review'])
+        self.assertEqual(saved['status'], 'failed'); self.assertEqual(saved['errors'], value['errors'])
+        index = json.loads((self.root / '.vimax/sessions.json').read_bytes())
+        title = index['sessions'][saved['vimax_project_id']]['project_name']
+        self.assertIn('模型审阅未完成', title); self.assertNotIn('模型已全文复核', title)
+
+    def test_last_returned_call_must_cover_current_hash_and_count_even_when_goal_is_true(self):
+        value = self.independent_fixture(status='failed')
+        good = returned_review(value, {'goal_met': True, 'issues': []})
+        for changes in ({'state': 'started'}, {'messages_sha256': '2' * 64}, {'message_count': 149}):
+            value['program_review_history'] = [good, {**good, **changes}]
+            self.assertEqual(imp.independent_review_state(value), 'not_completed')
+        value['program_review_history'] = [good]
+        self.assertEqual(imp.independent_review_state(value), 'reviewed')
 
     def test_independent_wrong_parent_or_inherited_initial_context_rejected(self):
         value = self.independent_fixture(); value['version_record']['parent_run'] = 'old-run'; self.save_independent(value)
@@ -179,6 +243,7 @@ class ArchiveSafety(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        shutil.copyfile(HERE / 'import-natural-dialogue.py', self.root / 'import-run.py')
 
     def bundle(self, extra=None, override=None):
         files = {'V01/run.json': b'original bytes', 'publish.py': b'frozen source'}
@@ -212,6 +277,28 @@ class ArchiveSafety(unittest.TestCase):
                 with self.assertRaises(AssertionError): self.extract(path, manifest)
                 self.assertFalse((self.root / 'archive').exists())
                 self.assertFalse(list(self.root.glob('archive.staging-*')))
+
+    def test_only_two_exact_audited_hidden_source_paths_are_allowed(self):
+        for prefix in ('', 'V01/', 'V14-R001/', 'V40-R1234/'):
+            for name in ('evolve-natural.py', 'generate-independent.py'):
+                path = prefix + 'sources/.vimax/deploy/' + name
+                self.assertEqual(pub.safe_name(path).as_posix(), path)
+        for path in ('sources/.vimax/deploy/runtime-model.yaml', 'sources/.vimax/deploy/import-natural-dialogue.py',
+                     '.vimax/deploy/evolve-natural.py', 'V01/sources/.private/deploy/evolve-natural.py',
+                     'V01/sources/.vimax/deploy/evolve-natural.py/extra', 'V00/sources/.vimax/deploy/evolve-natural.py',
+                     'V01-R001/sources/.vimax/../deploy/evolve-natural.py', 'V01/.runtime/app.sqlite3'):
+            with self.subTest(path=path), self.assertRaises(AssertionError): pub.safe_name(path)
+
+    def test_revision_prefixed_audited_source_bytes_survive_exact_tar_install(self):
+        files = {'V14-R001/sources/.vimax/deploy/evolve-natural.py': b'complete archived base source\n',
+                 'V14-R001/sources/.vimax/deploy/generate-independent.py': b'complete archived independent source\n'}
+        manifest = {name: pub.sha(value) for name, value in files.items()}
+        path = self.root / 'audited-sources.tar.gz'
+        with tarfile.open(path, 'w:gz') as archive:
+            for name, value in {**files, 'sha256.json': pub.canonical(manifest)}.items():
+                member = tarfile.TarInfo(name); member.size = len(value); archive.addfile(member, io.BytesIO(value))
+        self.assertEqual(self.extract(path, manifest), 'installed')
+        for name, value in files.items(): self.assertEqual((self.root / 'archive' / name).read_bytes(), value)
 
     def test_bad_file_hash_or_bundle_hash_rejected_before_staging(self):
         path, manifest = self.bundle(override={'V01/run.json': b'wrong'})
@@ -291,7 +378,7 @@ class ArchiveSafety(unittest.TestCase):
         shutil.copyfile(HERE / 'publish-natural-safe.py', self.root / 'publish-natural-base.py')
         plan = pub.arguments('20261015-abcdef0', '20261015-123abcd', ['V01'], 'V01')
         base = pub.configure_base(plan, 'publish', self.root)
-        source = evidence(legacy.run('V02')); source['program_review_history'] = [{'review': {'goal_met': True, 'issues': []}}]
+        source = evidence(legacy.run('V02')); source['program_review_history'] = [returned_review(source, {'goal_met': True, 'issues': []})]
         folder = self.root / 'archive/V01'; folder.mkdir(parents=True)
         (folder / 'run.json').write_text(json.dumps(source), encoding='utf-8')
         (folder / 'review-index.json').write_text('{"verdict":"candidate"}')
@@ -313,6 +400,27 @@ class ArchiveSafety(unittest.TestCase):
             actual['publication']['human_verdict'] = 'candidate'; actual['corpus_reference'] = {'changed': True}
             with self.assertRaisesRegex(AssertionError, 'corpus_reference'): base.verify_state(state, {}, index)
 
+    def test_publisher_verify_rejects_final_failed_call_mislabelled_as_reviewed(self):
+        shutil.copyfile(HERE / 'publish-natural-safe.py', self.root / 'publish-natural-base.py')
+        plan = pub.arguments('20261015-abcdef0', '20261015-123abcd', ['V01'], None)
+        base = pub.configure_base(plan, 'candidate', self.root)
+        source = evidence(legacy.run('V02')); source.update(status='failed', errors=['final model review call failed'])
+        good = returned_review(source, {'goal_met': True, 'issues': []})
+        failed = {key: value for key, value in good.items() if key != 'review'}; failed.update(state='failed', error='connection failure')
+        source.update(program_review_history=[good, failed], outcome_review={'met': True})
+        folder = self.root / 'archive/V01'; folder.mkdir(parents=True)
+        (folder / 'run.json').write_text(json.dumps(source), encoding='utf-8'); (folder / 'review-index.json').write_text('{"verdict":"needs_revision"}')
+        (folder.parent / 'corpus').mkdir(); (folder.parent / 'corpus/lccc.json').write_bytes(corpus_bytes()); base.ARCHIVE = folder.parent
+        actual = json.loads(json.dumps(source)); actual['publication'] = {'series': pub.SERIES, 'parent_run': None,
+            'read_only': True, 'source_run_sha256': pub.sha((folder / 'run.json').read_bytes()), 'selected': False,
+            'user_selected': False, 'human_verdict': 'needs_revision', 'style_label': source['creative_variation']['style_label'],
+            'program_review_state': 'reviewed'}
+        state = self.root / 'state'; state.mkdir(); pub.install_runtime_corpus(state, corpus_bytes())
+        index = {'sessions': {}, 'active_session_id': 'old'}; (state / 'sessions.json').write_text(json.dumps(index))
+        with patch.object(base, 'database_rows', side_effect=lambda state: {source['id']: json.dumps(actual)}):
+            with self.assertRaises(AssertionError): base.verify_state(state, {}, index)
+            actual['publication']['program_review_state'] = 'not_completed'; base.verify_state(state, {}, index)
+
     def source_tree(self):
         scripts = self.root / '.vimax/deploy'; scripts.mkdir(parents=True)
         for name in ('import-natural-dialogue.py', 'publish-natural-safe.py'):
@@ -322,7 +430,12 @@ class ArchiveSafety(unittest.TestCase):
         value['candidate_versions'] = [{'fixture': True}]
         (folder / 'run.json').write_text(json.dumps(value), encoding='utf-8')
         (folder / 'template.json').write_text('{}'); (folder / 'review-index.json').write_text('{}')
-        (folder / 'hashes.json').write_text(json.dumps({'run.json': pub.sha((folder / 'run.json').read_bytes())}))
+        hashes = {'run.json': pub.sha((folder / 'run.json').read_bytes())}
+        for name in ('evolve-natural.py', 'generate-independent.py'):
+            relative = 'sources/.vimax/deploy/' + name; path = folder / relative; path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(('complete source snapshot fixture: ' + name).encode())
+            hashes[relative] = pub.sha(path.read_bytes())
+        (folder / 'hashes.json').write_text(json.dumps(hashes))
         (output / 'versions.json').write_text(json.dumps([{'version': 'V01', 'run_id': value['id'], 'publication_eligible': True}]))
         (output / 'lccc.corpus.json').write_bytes(corpus_bytes())
         corpus = output / '语料来源/LCCC'; corpus.mkdir(parents=True)
@@ -340,6 +453,8 @@ class ArchiveSafety(unittest.TestCase):
         self.assertTrue({'publish.py', 'publish-natural-base.py', 'import-run.py', 'publication-plan.json'} <= names)
         self.assertIn('语料来源/LCCC/LICENSE.txt', names)
         self.assertIn('corpus/lccc.json', names)
+        self.assertIn('V01/sources/.vimax/deploy/evolve-natural.py', names)
+        self.assertIn('V01/sources/.vimax/deploy/generate-independent.py', names)
         self.assertFalse(any('.runtime' in name or 'runtime-model' in name for name in names))
         self.assertEqual(self.extract(directory / 'archive.tar.gz', receipt['manifest']), 'installed')
 
