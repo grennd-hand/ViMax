@@ -1,4 +1,4 @@
-// Completed histories can be reused briefly; running/paused records always refresh.
+// Completed and immutable published histories can be reused briefly.
 export function createRecordLoader(request, {ttl = 60_000, now = Date.now} = {}) {
   const cache = new Map();
   return {
@@ -20,7 +20,7 @@ export function createRecordLoader(request, {ttl = 60_000, now = Date.now} = {})
       };
       const {template: embedded, ...previous} = run;
       const value = {run: previous, template};
-      if (['completed', 'early_end'].includes(run.status)) {
+      if (run.publication?.read_only === true || ['completed', 'early_end'].includes(run.status)) {
         if (cache.size >= 20) cache.delete(cache.keys().next().value);
         cache.set(id, {value, expires: now() + ttl});
       }

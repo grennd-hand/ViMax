@@ -15,9 +15,17 @@ it('opens a history in one request, reuses it within its lifetime, and refreshes
   current=60_001;await loader.load('saved');expect(request).toHaveBeenCalledTimes(2);
   loader.clear();await loader.load('saved');expect(request).toHaveBeenCalledTimes(3);
 });
-it.each(['running','paused'])('does not reuse mutable %s histories',async(status)=>{
+it.each(['running','paused','failed'])('does not reuse mutable %s histories',async(status)=>{
   const request=vi.fn(async()=>payload(status));const loader=createRecordLoader(request);
   await loader.load('saved');await loader.load('saved');expect(request).toHaveBeenCalledTimes(2);
+});
+it.each(['paused','failed'])('reuses immutable published %s histories',async(status)=>{
+  const value={...payload(status),publication:{read_only:true}};
+  const request=vi.fn(async()=>value);const loader=createRecordLoader(request);
+  const first=await loader.load('saved');
+  expect(await loader.load('saved')).toBe(first);
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(first.run.status).toBe(status);
 });
 it('does not retain a response after switching away and aborting, even when transport finishes later',async()=>{
   let finish;
