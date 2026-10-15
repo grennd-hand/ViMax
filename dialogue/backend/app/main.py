@@ -617,6 +617,7 @@ def simulation_detail(session_id: str, view: Literal["full", "workspace"] = "ful
               "validation": validate_run(source, run) if run["status"] in {"completed", "early_end"} else []}
     if view == "workspace":
         fields = {"id", "template_id", "status", "messages", "config", "revision", "cursor", "errors",
+                  "version_record", "publication", "program_review_deferred",
                   "pause_reason", "outcome_review", "review_progress", "agent_sessions", "public_decisions",
                   "scene_progress", "validation", "vimax_events", "story_arc", "story_arc_source",
                   "memory_status", "memory_reflections"}
@@ -666,6 +667,8 @@ async def pause(session_id: str) -> dict:
 @app.post("/api/simulations/{session_id}/resume")
 async def resume(session_id: str) -> dict:
     run = get_run(session_id)
+    if run.get('publication', {}).get('read_only'):
+        raise HTTPException(409, '这是已归档版本，仅供回看。请在新版本中修改，历史原稿保留。')
     resumable_failure = run["status"] == "failed"
     if run["status"] != "paused" and not resumable_failure:
         raise HTTPException(409, "当前模拟无法继续")

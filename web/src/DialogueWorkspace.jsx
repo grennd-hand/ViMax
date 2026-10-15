@@ -25,6 +25,26 @@ async function api(path, options = {}) {
 
 const steps = ['导入母本', '确认目标', '设置角色', '模拟对话']
 
+export function archiveLabel(run) {
+  const human = ({ candidate: '人工候选', alternative: '表达备选', needs_revision: '人工需修订' })[run?.publication?.human_verdict] || '历史版本'
+  const program = ({ deferred: '模型全文复核未执行', reviewed: '模型已全文复核', not_completed: '模型审阅未完成' })[run?.publication?.program_review_state] || '模型审阅状态未记录'
+  return `${run?.publication?.version || ''} · ${human} · ${program}${run?.status === 'failed' ? ' · 程序未通过' : ''}`
+}
+
+export function ArchiveReviewNotice({ run }) {
+  return <>{run.publication.display_note && <p className="analysis-notice">{run.publication.display_note}{run.publication.representative_version && <span> 本编号正式内容代表：{run.publication.representative_version}。</span>}</p>}<p className="muted">{run.publication.human_summary}</p>{run.outcome_review?.met === undefined && <p className="muted">目标达成情况尚无完整模型复核结论。</p>}</>
+}
+
+export function RunActions({ run, scheduleLength, action }) {
+  if (run.publication?.read_only) return <div className="chat-actions"><p className="muted">正在回看此版本原稿。历史台词只读，修改将在新版本中进行。</p></div>
+  return <div className="chat-actions">
+    {run.status === 'running' && <button className="button ghost" onClick={() => action('pause')}><PauseCircle size={17} />暂停</button>}
+    {run.status === 'paused' && <button className="button ghost" onClick={() => action('resume')}><PlayCircle size={17} />继续</button>}
+    {run.status === 'failed' && <button className="button ghost" onClick={() => action('resume')}><PlayCircle size={17} />{run.cursor < scheduleLength ? '从失败处继续' : '重新复核'}</button>}
+    {['completed', 'early_end', 'failed'].includes(run.status) && <button className="button ghost" onClick={() => action('retry')}><ArrowClockwise size={17} />重试生成</button>}
+  </div>
+}
+
 function Card({ title, eyebrow, children, className = '' }) {
   return <section className={`card ${className}`}><div className="card-head"><span>{eyebrow}</span><h2>{title}</h2></div>{children}</section>
 }
@@ -320,15 +340,17 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
   const finished = ['completed', 'early_end', 'failed'].includes(run?.status)
   const scheduleLength = run?.schedule_length ?? run?.schedule?.length ?? run?.config?.target_messages ?? 0
   const valid = finished && run.status !== 'failed' && !((run.validation || []).length || (run.errors || []).length)
-  const goalMet = run?.outcome_review?.met !== false
+  const archived = run?.publication?.read_only === true
+  const archivedLabel = archiveLabel(run)
+  const goalMet = archived ? run?.outcome_review?.met === true : run?.outcome_review?.met !== false
   const reviewing = run?.status === 'running' && Boolean(run.review_progress?.phase)
-  const runStateLabel = reviewing
+  const runStateLabel = archived ? archivedLabel : reviewing
     ? ({ planning: '正在规划群聊事件', writing: `正在续写对话 ${run?.review_progress?.drafted || 0} / ${run?.config?.target_messages || target} 条`, validate: '正在检查原值与条数', broadcast: '正在保存角色经历', review: '正在检查对话', repair: '正在修订问题', verify: '正在复查修订' })[run.review_progress?.phase] || '正在检查对话'
     : run?.status === 'early_end' && !goalMet ? '目标未达成'
       : ({ running: '正在生成', paused: '已暂停', completed: '已完成', early_end: '客户提前退出', failed: '生成失败' })[run?.status] || run?.status
 
   return <div className="dialogue-workspace">
-    <nav className="dialogue-steps">{steps.map((name, index) => <button key={name} onClick={() => index <= step && setStep(index)} className={step === index ? "active" : ""} disabled={index > step || recordLoading || Boolean(recordError)}>{index + 1}. {name}</button>)}</nav>
+    <nav className="dialogue-steps">{steps.map((name, index) => <button key={name} onClick={() => index <= step && setStep(index)} className={step === index ? "active" : ""} disabled={index > step || recordLoading || Boolean(recordError) || (archived && index !== 3)}>{index + 1}. {name}</button>)}</nav>
     <main className="main"><header className="topbar"><div><span className="overline">群聊创作</span><h1>{recordLoading ? '正在打开剧本' : recordError ? '剧本暂时无法打开' : steps[step]}</h1></div><span className="top-pill">{template?.filename || '尚未选择母本'}</span></header>
       {error && <div className="error-banner" role="alert">{error}</div>}
 
@@ -358,9 +380,9 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
       {!recordLoading && !recordError && step === 3 && run && <div className="simulation-layout" data-run-id={run.id}><Card eyebrow="05 / 群聊排演" title="模拟对话" className="chat-card"><div className="chat-toolbar"><span className={`run-state ${run.status}`}>{runStateLabel}</span><span>{run.config?.language || language} · {run.messages?.length || 0} / {run.config?.target_messages || target} 条</span></div><div className="run-model">模型：{run.config?.dialogue_model || dialogueModel} · 推理强度：{({low: '低', medium: '中', high: '高'})[run.config?.reasoning_effort] || '模型默认'}</div>
         {run.pause_reason && <div className="error-banner pause-banner">{run.pause_reason}</div>}
         <div className="chat-scroll" ref={chatScroll}>{!run.messages?.length && <div className="chat-empty">{run.status === 'paused' ? '这份记录已暂停，尚未生成对话。' : '正在安排第一条消息…'}</div>}{(run.messages || []).map(message => <Bubble message={message} language={run.config?.language || language} key={message.seq} />)}</div>
-        <div className="chat-actions">{run.status === 'running' && <button className="button ghost" onClick={() => action('pause')}><PauseCircle size={17} />暂停</button>}{run.status === 'paused' && <button className="button ghost" onClick={() => action('resume')}><PlayCircle size={17} />继续</button>}{run.status === 'failed' && <button className="button ghost" onClick={() => action('resume')}><PlayCircle size={17} />{run.cursor < scheduleLength ? '从失败处继续' : '重新复核'}</button>}{finished && <button className="button ghost" onClick={() => action('retry')}><ArrowClockwise size={17} />重试生成</button>}</div></Card>
+        <RunActions run={run} scheduleLength={scheduleLength} action={action} /></Card>
         <div className="right-rail"><EventPlan run={run} />{run.story_arc?.length > 0 && <Card eyebrow="剧情规划" title="本轮事件线"><p className="muted">{['model', 'model-revised', 'model-topics', 'cached-model-topics'].includes(run.story_arc_source) ? '根据母本规划' : run.story_arc_source === 'topic-poor' ? '话题多样性不足' : run.story_arc_source === 'hybrid' ? '母本与通用事件结合' : '使用通用事件线'} · {run.story_arc.length} 个情节点。事件只在角色公开说出后才算发生。</p><details className="story-arc"><summary>查看全部情节点</summary><ol>{run.story_arc.map((beat, index) => <li key={index} className={!(run.scene_progress || []).some(item => item.id === index && item.state === "resolved") && index === run.story_arc.findIndex((beat, id) => !(run.scene_progress || []).some(item => item.id === id && item.state === "resolved") && (beat.kind !== "closure" || run.cursor >= scheduleLength - 3)) ? 'current' : ''}>{beat.event}{beat.characters?.length > 0 && <small>建议：{beat.characters.join('、')}</small>}</li>)}</ol></details></Card>}<Card eyebrow="06 / 人物会话" title="人物会话记忆"><p className="muted">逐段续写读取公开对话和各自的发言、回应与选择记录；人物按兴趣接话，也可以不发言。</p>{run.config?.memory_enabled && <p className="muted">{({ semantic: '已启用多语言语义检索', lexical: '当前使用文字检索', empty: '人物从本轮开始积累经历' })[run.memory_status?.mode] || '正在读取相关人物经历'} · 本轮想起 {run.memory_status?.recalled || 0} 条。历史动作不计入本轮进度。</p>}<div className="agent-session-list">{Object.entries(run.agent_sessions || {}).map(([name, session]) => <div className="agent-session-item" key={name}><div className="agent-session-head"><strong>{name}</strong><span>{session.turns} 次发言</span></div><details><summary>本轮记住 {session.memory_events?.length || 0} 件事</summary>{(session.memory_events || []).slice(-5).map((event, index) => <p key={`${event.seq}-${event.kind}-${index}`}>#{event.seq} {({ own_action: '自己做过', own_decision: '自己的决定', said_to: `对${event.peer}说`, heard_from: `${event.peer}对我说` })[event.kind] || '经历'}：{event.text}</p>)}</details><CharacterMemory run={run} name={name} session={session} /></div>)}</div></Card>
-          <Card eyebrow="07 / 检查与导出" title="生成结果"><div className={`result-banner ${valid && goalMet ? 'good' : ''}`}>{run.status === 'completed' ? '成功路径已完成' : run.status === 'early_end' ? goalMet ? '客户提前结束分支' : '本轮目标未达成' : run.status === 'failed' ? '生成未通过' : '模拟进行中'}</div>{!goalMet && run.outcome_review?.reason && <p className="validation-error">{run.outcome_review.reason}</p>}{[...(run.validation || []), ...(run.errors || [])].map((item, i) => <p className="validation-error" key={i}>{item}</p>)}<div className="download-row"><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/xlsx` : undefined}><ArrowDown size={17} />下载 Excel</a><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/json` : undefined}><ArrowDown size={17} />下载 JSON</a></div></Card></div></div>}
+          <Card eyebrow="07 / 检查与导出" title="生成结果"><div className={`result-banner ${valid && goalMet ? 'good' : ''}`}>{archived ? archivedLabel : run.status === 'completed' ? '成功路径已完成' : run.status === 'early_end' ? goalMet ? '客户提前结束分支' : '本轮目标未达成' : run.status === 'failed' ? '生成未通过' : '模拟进行中'}</div>{archived && <ArchiveReviewNotice run={run} />}{!goalMet && run.outcome_review?.reason && <p className="validation-error">{run.outcome_review.reason}</p>}{[...(run.validation || []), ...(run.errors || [])].map((item, i) => <p className="validation-error" key={i}>{item}</p>)}<div className="download-row"><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/xlsx` : undefined}><ArrowDown size={17} />下载 Excel</a><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/json` : undefined}><ArrowDown size={17} />下载 JSON</a></div></Card></div></div>}
     </main>
   </div>
 }
