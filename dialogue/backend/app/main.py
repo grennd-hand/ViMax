@@ -556,7 +556,7 @@ async def start_simulation(config: SimulationConfig) -> dict:
         raise HTTPException(422, str(exc)) from exc
     normalized_config = config.model_dump()
     normalized_config['opening_policy'] = opening_policy(config.target_messages)
-    normalized_config['dialogue_flow_version'] = 2
+    normalized_config['dialogue_flow_version'] = 3
     schedule = opening_schedule(schedule, normalized_config['opening_policy'])
     normalized_config["reasoning_effort"] = model_reasoning_effort(normalized_config)
     roles = ["坐席"] + template["source"]["accounts"] + [f"客户{i + 1}" for i in range(config.customer_count)]
@@ -769,6 +769,10 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "还要按 output_language 检查长对话里不同角色是否反复共用同一种汇报句式，是否连续把每句话写成‘已完成、下一步、等待确认’，"
         "以及是否多人轮流重复同一未知条件或风险提醒；保留必要提醒，但不要让它占据整段对话。"
         "以及角色口吻是否逐渐混成同一个人。style_findings 是带原句的候选证据，须结合上下文判断；确实有不同观察或自然回应时不要误报。"
+        "跨全文检查同一生活小事是否被延长为大量道具状态汇报、同一个笑点是否反复解释；"
+        "热饭到收拾餐盒、挑照片到擦杯子等主题即使每条不同，也不能仅靠微小动作变化撑篇幅。"
+        "结合persona_cards检查不同人物的关注点、判断和接话意愿，不用名人腔或口头禅衡量人格。"
+        "检查是否每次提问都被群友夸赞、每句玩笑都获捧场、各人操作汇报可以互换署名；引用两处以上证据再判断模式。"
         "opening_contract规定寒暄再了解群用途，转场由实际交流产生，不固定条号。"
         "对新版rolling_conversation检查安排感：多个群友逐项见证同一个人操作、把动作拆成准备做正在做已做、"
         "角色反复解释自主性或互相称赞理性、已经解决的问题无新背景又重问，都应引用具体台词标出。"

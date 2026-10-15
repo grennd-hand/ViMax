@@ -1,6 +1,6 @@
 import json
 import unittest
-from app.conversation_flow import rolling_context, naturalness_evidence, flow_errors
+from app.conversation_flow import rolling_context, naturalness_evidence, flow_errors, repeated_passages
 from app.opening import opening_policy
 from app.vimax_engine import decode_scenes
 from app.narrative_plan import parse_plan
@@ -75,6 +75,25 @@ class FlowTests(unittest.TestCase):
     def test_self_explanations_are_evidence_not_automatic_errors(self):
         messages = [{'seq': 1, 'content': '不是别人劝的，是我自己想试', 'reply_to': None, 'delay': '4'}]
         self.assertEqual(naturalness_evidence(messages)['self_explanation_candidates'][0]['seq'], 1)
+
+    def test_cross_segment_copied_reports_are_review_evidence(self):
+        messages = [{'seq': 48, 'sender': '客户1', 'content': '我打开入口，给指定商品点了赞，也截好图了。'},
+                    {'seq': 85, 'sender': '客户2', 'content': '我打开入口，给指定商品点了赞，也截好图了。'}]
+        findings = repeated_passages(messages)
+        self.assertEqual([(f['earlier_seq'], f['seq']) for f in findings], [(48, 85)])
+        self.assertEqual(repeated_passages([{'seq': 1, 'content': 'https://example.com/very-long-path 【FHR888】'},
+                                           {'seq': 2, 'content': 'https://example.com/very-long-path 【FHR888】'}]), [])
+
+    def test_turn_selection_keeps_private_intents_scoped_and_history_unchanged(self):
+        run = self.fixture()
+        run['config']['dialogue_flow_version'] = 3
+        run['person_situations']['客户1']['wants'] = '自己想问的问题，还没公开'
+        history = [{'seq': 1, 'sender': '坐席', 'content': '大家好', 'reply_to': None, 'stage': '寒暄暖场'}]
+        context = rolling_context(run, history)
+        self.assertEqual(context['public_history'][0]['content'], '大家好')
+        self.assertNotIn('wants', context['private_by_owner']['客户2']['personal_now'])
+        self.assertEqual(context['private_by_owner']['客户1']['personal_now']['wants'], '自己想问的问题，还没公开')
+        self.assertEqual(context['turn_selection']['recurrence_candidates'], [])
 
     def test_new_plan_requires_threads_and_private_situations(self):
         run = self.fixture()

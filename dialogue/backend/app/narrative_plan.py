@@ -44,10 +44,50 @@ class PersonSituation(BaseModel):
     may_ignore: str = Field(description='哪些与自己无关的消息可以不接')
 
 
+class ConversationBeat(module.Event):
+    roles: list[str] = Field(min_length=1)
+    cause: str = Field(min_length=1)
+    outcome: str = Field(min_length=1)
+    carry_forward: str = Field(min_length=1)
+    trigger: str = Field(min_length=1, description='什么公开消息或本人需要能引出它；没有触发就不用')
+    stop_when: str = Field(min_length=1, description='何时话题已经说够，停止续写；不预定消息区间')
+
+
+class PersonIntent(PersonSituation):
+    wants: str = Field(min_length=1, description='本人此刻想解决的具体事情，不预定参加或拒绝')
+    attention: str = Field(min_length=1, description='结合人格，什么信息值得本人开口')
+    reply_when: str = Field(min_length=1, description='对谁的哪类话愿意接，接话给对方带来什么新内容')
+    leave_unanswered: str = Field(min_length=1, description='即使看到了也不想回应的内容')
+    voice: str = Field(min_length=1, description='表达长度、直接程度、解释习惯，不写固定口头禅')
+    relationship: str = Field(min_length=1, description='起初是陌生群友；熟悉程度只随公开互动改变')
+
+
+class OrganicPlan(BaseModel):
+    events: list[ConversationBeat] = Field(min_length=1, max_length=18)
+    threads: list[ConversationThread] = Field(min_length=1, max_length=8)
+    people: list[PersonIntent] = Field(min_length=1)
+
+
 DialoguePlan.model_rebuild()
 
 
 def planning_requirement(run: dict) -> str:
+    if run['config'].get('dialogue_flow_version', 1) >= 3:
+        return (
+            '\n' + opening_requirement(run) +
+            '先把人格卡转成每个人的wants、attention、reply_when、leave_unanswered、voice；'
+            '角色差异必须影响注意、误解、选择和接话对象，不是给每个人分配一种生活道具。'
+            '初入群互不熟悉；不编造共同过去。少数人可逐渐聊熟，别人不必跟着捧场。'
+            '事件是可触发的交流素材，不是时间表。禁止分配消息编号、条数配额、固定主行动者或轮流完成名单。'
+            'index只标识素材，is_last只表示列表结束，不代表群聊必须按顺序演完；'
+            '无需把所有素材都用上。process_chain描述信息差或真实意见如何变化，而非逐项操作汇报。'
+            '每个素材给出trigger和stop_when；问题有答案、笑点已接住、个人小事已办完就停止，不续写道具状态。'
+            '为所需长篇准备有区别的兴趣、真实疑问、个人经历和观点碰撞，日常选择无需变成一串清洁或吃饭步骤。'
+            '可以聊出分歧、答非预期或无人接话，不预排谁赞同谁；不以开新业务条件或页面故障制造信息量。'
+            '业务事实仅来自母本；人物决定和动作仍须遵守已公开信息与因果顺序。'
+            '仅返回以下JSON结构，所有说明使用输出语言：\n' +
+            json.dumps(OrganicPlan.model_json_schema(), ensure_ascii=False)
+        )
     policy = run['config'].get('opening_policy')
     legacy = policy and policy.get('version', 1) == 1
     boundaries = (f"寒暄暖场必须为独立事件并结束于第{policy['warm_end']}条，"
@@ -77,14 +117,16 @@ def parse_plan(text: str, run: dict) -> list[dict]:
     import sys
     if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
     from utils.robust_json_parser import TrailingCommaTolerantPydanticOutputParser
+    organic = run['config'].get('dialogue_flow_version', 1) >= 3
     try:
-        plan = TrailingCommaTolerantPydanticOutputParser(pydantic_object=DialoguePlan).parse(text)
+        plan = TrailingCommaTolerantPydanticOutputParser(pydantic_object=OrganicPlan if organic else DialoguePlan).parse(text)
     except Exception as exc:
-        raise ValueError('事件规划格式不完整，需要包含起因、过程、结果和消息区间') from exc
+        raise ValueError('事件规划格式不完整，需要包含人物动机、话题触发与停止条件' if organic else
+                         '事件规划格式不完整，需要包含起因、过程、结果和消息区间') from exc
     expected = 1
     roles = set(run['agent_sessions'])
     for index, event in enumerate(plan.events):
-        if event.index != index or event.message_start != expected or event.message_end < expected:
+        if event.index != index or (not organic and (event.message_start != expected or event.message_end < expected)):
             raise ValueError('事件规划的编号或消息区间不连续')
         if not set(event.roles) <= roles:
             raise ValueError('事件规划使用了未设置的人物')
@@ -92,11 +134,12 @@ def parse_plan(text: str, run: dict) -> list[dict]:
             raise ValueError('事件规划缺少具体交流过程')
         if event.is_last != (index == len(plan.events)-1):
             raise ValueError('事件规划的结束标记不正确')
-        expected = event.message_end + 1
-    if expected != run['config']['target_messages'] + 1:
+        if not organic:
+            expected = event.message_end + 1
+    if not organic and expected != run['config']['target_messages'] + 1:
         raise ValueError('事件规划未覆盖所需消息总数')
     policy = run['config'].get('opening_policy')
-    if policy and policy.get('version', 1) == 1:
+    if not organic and policy and policy.get('version', 1) == 1:
         ends = {event.message_end for event in plan.events}
         if not {policy['warm_end'], policy['orientation_end']} <= ends:
             raise ValueError('事件规划需将寒暄暖场、了解群用途与正题分开，保持规定的开场区间')

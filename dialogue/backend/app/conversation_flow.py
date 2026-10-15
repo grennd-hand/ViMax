@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 
 
 STAGES = ['寒暄暖场', '了解群用途', '自然群聊']
@@ -22,9 +23,36 @@ def rolling_context(run: dict, history: list[dict]) -> dict:
             'last_nonactive_choice': choices[-1]['task_state'] if choices else 'unknown',
             'past_experience': session.get('long_term_memory', [])[:4],
         }
-    return {'public_history': [{k: m[k] for k in ('seq', 'sender', 'content', 'reply_to', 'stage')} for m in history],
+    context = {'public_history': [{k: m[k] for k in ('seq', 'sender', 'content', 'reply_to', 'stage')} for m in history],
             'private_by_owner': states, 'threads': run.get('conversation_threads', []),
             'current_stage': history[-1]['stage'] if history else STAGES[0]}
+    if run['config'].get('dialogue_flow_version', 1) >= 3:
+        context['turn_selection'] = {
+            'rule': '根据本人需要与公开消息选择发言，不按最近没说话或人头平衡补台词；私人动机不能被别人直接接住。',
+            'relationship_baseline': '陌生群友，熟悉程度只依据已有公开互动；不要让所有人立即互相照料。',
+            'recurrence_candidates': repeated_passages(history),
+            'continuation_check': '对照全文，问题有答案就不重新教学；再次提起旧话题必须带来新事实、不同观点或个人需要。',
+        }
+    return context
+
+
+def repeated_passages(messages: list[dict]) -> list[dict]:
+    """Flag full-run repeated wording for contextual review, never rewrite facts."""
+    candidates, previous = [], []
+    for message in messages:
+        # Shared literals alone are not evidence of copied dialogue.
+        text = re.sub(r'https?://\S+|【[^】]*】|@\w+', '', message['content'])
+        text = re.sub(r'\W+', '', text).casefold()
+        if len(text) < 14:
+            continue
+        match = next((old for old, normalized in reversed(previous)
+                      if SequenceMatcher(None, normalized, text).ratio() >= .86), None)
+        if match:
+            candidates.append({'seq': message['seq'], 'earlier_seq': match['seq'],
+                               'quote': message['content'], 'earlier_quote': match['content'],
+                               'reason': '跨全文近似表达，需核对是否确有新的信息，正常引用不自动判错'})
+        previous.append((message, text))
+    return candidates[-12:]
 
 
 def naturalness_evidence(messages: list[dict]) -> dict:
@@ -37,7 +65,8 @@ def naturalness_evidence(messages: list[dict]) -> dict:
                   for m in messages if pattern.search(m['content'])]
     return {'messages': total, 'explicit_reply_ratio': round(replies / total, 3) if total else 0,
             'delay_values': sorted({int(m.get('delay') or 1) for m in messages}),
-            'self_explanation_candidates': candidates[:12]}
+            'self_explanation_candidates': candidates[:12],
+            'repeated_passage_candidates': repeated_passages(messages)}
 
 
 def flow_errors(messages: list[dict], source_literals: list[str], complete: bool = True) -> list[str]:

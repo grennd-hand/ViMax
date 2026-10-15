@@ -39,3 +39,34 @@ class NovelEventPlanTests(unittest.TestCase):
     def test_local_trailing_comma_recovery_avoids_another_model_call(self):
         text=json.dumps({'events':self.events},ensure_ascii=False)[:-1]+',}'
         self.assertEqual(parse_plan(text,self.run),self.events)
+
+    def organic_plan(self):
+        self.run['config']['dialogue_flow_version'] = 3
+        event = {k: v for k, v in self.events[0].items() if k not in {'message_start', 'message_end'}}
+        event.update(is_last=True, trigger='有人询问群用途', stop_when='用途已经得到解答')
+        people = [dict(role=role, personal_now='刚进群', cares_about='自己的安排', may_ignore='无关进度',
+                       wants='判断是否适合自己', attention='具体做法', reply_when='有人问到自己经历过的事',
+                       leave_unanswered='别人的材料进度', voice='简短直接', relationship='陌生群友')
+                  for role in self.run['agent_sessions']]
+        return {'events': [event], 'threads': [{'topic': '群用途', 'kind': '业务', 'roles': ['客户1'], 'seed': '刚进群'}],
+                'people': people}
+
+    def test_organic_plan_does_not_need_message_coverage_or_a_timetable(self):
+        data = self.organic_plan()
+        self.run['config']['target_messages'] = 150
+        result = parse_plan(json.dumps(data), self.run)
+        self.assertNotIn('message_start', result[0])
+        self.assertEqual(result[0]['stop_when'], '用途已经得到解答')
+        self.assertEqual(self.run['person_situations']['客户1']['voice'], '简短直接')
+
+    def test_organic_plan_rejects_missing_stop_conditions_intents_and_unknown_roles(self):
+        for missing in ('stop_when', 'attention', 'unknown_role'):
+            data = self.organic_plan()
+            if missing == 'stop_when':
+                del data['events'][0]['stop_when']
+            elif missing == 'attention':
+                del data['people'][0]['attention']
+            else:
+                data['events'][0]['roles'] = ['未知群友']
+            with self.assertRaises(ValueError):
+                parse_plan(json.dumps(data), self.run)
