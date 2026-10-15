@@ -258,7 +258,7 @@ async def process(session_id, api):
                 run["vimax_events"] = parse_plan(story, run)
                 run["vimax_story"] = json.dumps({"events": run["vimax_events"]}, ensure_ascii=False)
                 api.save_run(run)
-            if run['config'].get('creation_mode') == 'independent_random':
+            if run['config'].get('creation_mode') == 'independent_random' and run['config']['target_messages'] <= 50:
                 if not run.get('vimax_draft'):
                     run['review_progress'].update(phase='writing', drafted=0, target=run['config']['target_messages'])
                     api.save_run(run)
@@ -291,7 +291,8 @@ async def process(session_id, api):
                 history = list(run.get('vimax_draft', []))
                 while len(history) < target:
                     start = len(history) + 1
-                    count = min(30, target - len(history))
+                    independent = run['config'].get('creation_mode') == 'independent_random'
+                    count = min(50 if independent else 30, target - len(history))
                     run['review_progress'].update(phase='writing', drafted=len(history), target=target)
                     api.save_run(run)
                     request = contract + '\n仅续写本段，不重写已生成台词。读取public_history保持事实连续；private_by_owner里的个人处境未公开前仅本人知道。'
@@ -301,10 +302,11 @@ async def process(session_id, api):
                     request += ('总条数不代表每个人都要发言。根据话题与本人关注选择发言者，不轮流点名，不让没人回应的话硬被接住。'
                                 '间隔按输入长度、停顿与忙自己的事自然变化，阶段为寒暄暖场、了解群用途、自然群聊。'
                                 '引用回复只在确有指向需要时使用，普通接话用0。'
-                                '只剩本段时保证愿意者已完成母本目标；可有普通接话结尾，不必坐席总结。')
+                                + ('最后一段检查至少一位虚构人物已完成故事内目标，结尾仍可普通接话。' if independent else
+                                   '只剩本段时保证愿意者已完成母本目标；可有普通接话结尾，不必坐席总结。'))
                     for attempt in range(2):
                         writer = writer_type(chat_model=RecordedChat(chat, api, session_id, f'write_{start}'))
-                        scenes = await writer.write_script_based_on_story(run['vimax_story'], request, system_prompt=WRITE_PROMPT)
+                        scenes = await writer.write_script_based_on_story(run['vimax_story'], request, system_prompt=INDEPENDENT_WRITE_PROMPT if independent else WRITE_PROMPT)
                         try:
                             segment = decode_scenes(scenes, run, start, count)
                             combined = history + segment
@@ -326,7 +328,8 @@ async def process(session_id, api):
                     latest['vimax_draft'] = history
                     latest['schedule'] = [{**slot, 'stage': history[i]['stage'] if i < len(history) else '自然群聊'}
                                           for i, slot in enumerate(latest['schedule'])]
-                    latest.setdefault('vimax_segments', []).append({'start': start, 'end': len(history)})
+                    latest.setdefault('vimax_segments', []).append({'start': start, 'end': len(history),
+                                                                   **({'strategy': 'independent_fresh_segments'} if independent else {})})
                     latest['review_progress'].update(phase='writing', drafted=len(history), target=target)
                     api.save_run(latest)
                     run = latest

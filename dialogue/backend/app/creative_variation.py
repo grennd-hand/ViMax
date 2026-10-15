@@ -36,6 +36,10 @@ _AXES = {
         ("plain", "平常随意", "用平常语气交流，少夸赞和安慰，不为每次动作安排感谢或总结。"),
         ("differences", "温和分歧", "允许小意见不同并停在那里；不为反对而反对，也不强迫全群最后意见一致。"),
         ("warming", "慢慢熟悉", "最初可以拘谨，具体往来之后再自然展开；不要一进群就像多年好友。"),
+        ("playful", "活泼互逗", "有人兴致高、顺口抛梗，也有人只回半句；幽默来自彼此眼前的反应，允许玩笑落空。"),
+        ("friction", "直说不认同", "喜恶说得直接，允许反驳、嫌弃某件事或略不耐烦；不做人身攻击，也不急着调停成一致。"),
+        ("enthusiastic", "兴奋有落差", "有人愿意多说自己真喜欢的事，有人兴趣一般；保留热情和冷淡的不对称，不让大家统一捧场。"),
+        ("deadpan", "淡淡接一句", "允许不解释透、轻微反问或一本正经接玩笑；人物可以不接下一句，不安排轮流输出金句。"),
     ),
     "narrative_density": (
         ("lean", "少讲背景", "主要说眼前反应，能明白的背景不补全；不要靠连续私人故事扩充条数。"),
@@ -171,7 +175,7 @@ def create_variation_plan(
         chosen_sources[role] = sources.get(role) or ("caller_override" if role in overrides else entry["id"])
         chosen_versions[role] = versions.get(role, entry.get("version", 1) if entry else 1)
     plan = {
-        "version": 1, "seed": seed, "seed_scope": "plan_selection_only_not_model_output",
+        "version": 2, "style_catalog_sha256": _digest(_AXES), "seed": seed, "seed_scope": "plan_selection_only_not_model_output",
         "method": "independent_generation", "parent_run": None, "language": code,
         "cast": cast, "style_label": " · ".join(axis["label"] for axis in axes.values()),
         "axes": axes, "persona_cards": cards, "persona_sources": chosen_sources,

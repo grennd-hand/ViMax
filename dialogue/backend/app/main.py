@@ -27,7 +27,7 @@ from .locale import language_context, message_char_limit, normalize_language
 from .persona_library import default_cards, default_entries, persona_library
 from .opening import opening_policy, opening_requirement, opening_schedule
 from .conversation_flow import naturalness_evidence
-from .model_stream import stream_model_content
+from .model_stream import ModelRefusalError, check_model_refusal, plain_text_refusal, stream_model_content
 from .persona_memory import record_public_memory
 from .memory_store import SQLiteMemoryStore, bind_characters, init_memory_schema, normalize_reflections, reflection_due, sync_accepted_memory
 from .memory_cognition import prepare_memory_context
@@ -272,6 +272,11 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                     else:
                         response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
                                                      timeout=min(request_timeout, remaining))
+                    if not response.is_success:
+                        try:
+                            check_model_refusal(response.json(), secrets=(base, key))
+                        except (ValueError, AttributeError):
+                            pass
                     if response.status_code == 400 and "reasoning_effort" in body:
                         try:
                             error = response.json().get("error", {})
@@ -289,14 +294,25 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                             else:
                                 response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
                                                              timeout=max(.01, min(request_timeout, deadline - time.monotonic())))
+                    if not response.is_success:
+                        try:
+                            check_model_refusal(response.json(), secrets=(base, key))
+                        except (ValueError, AttributeError):
+                            pass
                     response.raise_for_status()
                     if not stream:
-                        content = response.json()["choices"][0]["message"]["content"]
+                        completion = response.json()
+                        check_model_refusal(completion, secrets=(base, key))
+                        choice = completion["choices"][0]
+                        check_model_refusal(choice, secrets=(base, key))
+                        content = choice["message"]["content"]
                     if isinstance(content, list):
                         content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                     content = str(content).strip()
                     if content.startswith("```"):
                         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
+                    if plain_text_refusal(content):
+                        raise ModelRefusalError('refusal', content, secrets=(base, key))
                     try:
                         result = json.loads(content)
                     except json.JSONDecodeError:
@@ -309,8 +325,13 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                     if isinstance(result, list) and payload.get("scene_draft"):
                         result = {"turns": result}
                     if not isinstance(result, dict):
+                        if plain_text_refusal(result):
+                            raise ModelRefusalError('refusal', result, secrets=(base, key))
                         raise ValueError("模型未返回 JSON 对象")
                     return result
+                except ModelRefusalError as exc:
+                    # A terminal refusal must not try another route or lower effort.
+                    raise ModelRefusalError(exc.kind, exc.detail, secrets=(base, key)) from None
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
                     failure = f"模型 {candidate} 返回 HTTP {status}"
@@ -318,8 +339,12 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                         raise RuntimeError(failure) from exc
                 except (httpx.TimeoutException, TimeoutError):
                     failure = f"模型 {candidate} 请求超时"
-                except (httpx.TransportError, json.JSONDecodeError, KeyError, IndexError, ValueError):
-                    failure = f"模型 {candidate} 连接中断或返回格式无效"
+                except httpx.TransportError:
+                    failure = f"模型 {candidate} 连接中断或传输失败"
+                except json.JSONDecodeError:
+                    failure = f"模型 {candidate} 返回的 JSON 无效"
+                except (KeyError, IndexError, TypeError, ValueError):
+                    failure = f"模型 {candidate} 返回的响应结构或流式格式无效"
             if attempt == 0 and deadline - time.monotonic() > 1:
                 await asyncio.sleep(1)
     finally:

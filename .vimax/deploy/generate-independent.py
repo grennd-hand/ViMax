@@ -50,6 +50,92 @@ def read_template(path):
     return template, payload
 
 
+def read_material_notes(path, index, seed, corpus, corpus_sha256):
+    """Validate agent annotations against this fresh run's actual corpus sample."""
+    from app.dialogue_corpus import sample_reference
+    path = Path(path).resolve()
+    try:
+        payload = path.read_bytes()
+        document = json.loads(payload)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError('选材注释无法读取或JSON格式错误') from exc
+    if (not isinstance(document, dict) or document.get('annotation_kind') != 'agent_creative_inspiration'
+            or document.get('not_original_dialogue') is not True):
+        raise ValueError('选材文件必须明确为Agent创作启发，不能冒充原始对话')
+    if document.get('corpus_sha256') != corpus_sha256:
+        raise ValueError('选材注释绑定的语料SHA与实际语料文件不一致')
+    entries = document.get('entries')
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+        raise ValueError('选材注释缺少entries对象列表')
+    label = f'V{index:02d}'
+    matches = [entry for entry in entries if entry.get('version') == label or entry.get('seed') == seed]
+    if (len(matches) != 1 or matches[0].get('version') != label or matches[0].get('seed') != seed
+            or matches[0].get('index', index) != index):
+        raise ValueError('选材注释的版本和seed必须唯一且同时匹配本次新稿')
+    entry = matches[0]
+    if entry.get('annotation_kind') != 'agent_creative_inspiration' or entry.get('corpus_sha256') != corpus_sha256:
+        raise ValueError('所选条目缺少创作启发标记或语料SHA错绑')
+    samples = sample_reference(corpus, seed, count=4, max_turns=4)['samples']
+    identifiers = [sample['id'] for sample in samples]
+    if len(identifiers) != 4 or entry.get('conversation_ids') != identifiers:
+        raise ValueError('选材条目的4个会话ID与本次实际抽样不完全匹配')
+    bindings = entry.get('reference_bindings')
+    if not isinstance(bindings, list) or len(bindings) != 4:
+        raise ValueError('选材条目缺少4个完整语料来源绑定')
+    sources = {source['source_id']: source for source in corpus['sources']}
+    for sample, binding in zip(samples, bindings):
+        expected_sources = [{'source_id': attribution['source_id'],
+                             'source_record_index': attribution['source_record_index'],
+                             'source_sha256': sources[attribution['source_id']]['source_sha256']}
+                            for attribution in sample['attributions']]
+        if (not isinstance(binding, dict) or binding.get('conversation_id') != sample['id']
+                or binding.get('conversation_content_sha256') != sample['content_sha256']
+                or binding.get('excerpt_start') != sample['excerpt_start']
+                or binding.get('source_turn_indexes') != [turn['source_turn_index'] for turn in sample['turns']]
+                or binding.get('source_sha256_bindings') != expected_sources):
+            raise ValueError('选材条目的会话、回合位置或来源SHA绑定错误')
+    hints = entry.get('material_hints')
+    if not isinstance(hints, list) or not 2 <= len(hints) <= 3:
+        raise ValueError('所选创作启发条目需要2至3项话头')
+    for hint in hints:
+        if (not isinstance(hint, dict)
+                or any(not isinstance(hint.get(key), str) or not hint[key].strip()
+                       for key in ('topic_hint', 'creative_prompt', 'expression_impulse'))
+                or not isinstance(hint.get('inspired_by_conversation_ids'), list)
+                or not hint['inspired_by_conversation_ids']
+                or any(identifier not in identifiers for identifier in hint['inspired_by_conversation_ids'])):
+            raise ValueError('创作话头缺少内容、表达欲或实际来源会话ID')
+    snapshot = {'annotation_kind': 'agent_creative_inspiration', 'not_original_dialogue': True,
+                'source_path': str(path), 'source_file_sha256': base.sha(payload),
+                'selected_entry_sha256': base.sha(json.dumps(entry, ensure_ascii=False, sort_keys=True,
+                                                           separators=(',', ':')).encode()),
+                'selected_entry': copy.deepcopy(entry)}
+    material_story_notes(snapshot)  # Validate the model input length before starting any task.
+    return snapshot
+
+
+def material_story_notes(snapshot):
+    if snapshot is None:
+        return ''
+    hints = [{key: hint[key] for key in ('topic_hint', 'creative_prompt', 'expression_impulse')}
+             for hint in snapshot['selected_entry']['material_hints']]
+    text = ('Agent创作启发，非原语料/当前人物事实。以下仅是本份可选的话头与表达欲，可以转化、择取或不用。'
+            '它们不是逐句指令，不规定事件顺序、操作者、发言人、篇幅或业务比例；'
+            '不复制原故事、原人物身份或关系，不把它们当作当前群友已经公开的经历。'
+            '业务事实和行动前因仍以母本及本份公开聊天为准。\n' + json.dumps(hints, ensure_ascii=False))
+    if len(text) > 3000:
+        raise ValueError('选材启发超出补充素材长度，请精简至3000字以内')
+    return text
+
+
+def material_provenance(snapshot):
+    return {key: copy.deepcopy(snapshot[key]) for key in
+            ('annotation_kind', 'not_original_dialogue', 'source_path', 'source_file_sha256', 'selected_entry_sha256')} | {
+                'archive_path': 'material-notes.json', 'seed': snapshot['selected_entry']['seed'],
+                'version': snapshot['selected_entry']['version'],
+                'conversation_ids': copy.deepcopy(snapshot['selected_entry']['conversation_ids'])}
+
+
 def choose_customer_count(api, source, seed, requested=None):
     def feasible(count):
         try:
@@ -115,14 +201,14 @@ def _successful_review(run, records):
 
 
 async def run_fresh(api, out, template, index, seed, code, template_sha, corpus_evidence,
-                    export_xlsx, customer_count=None, poll_seconds=15, attempt_label=None):
+                    export_xlsx, customer_count=None, poll_seconds=15, attempt_label=None, material_notes=None):
     """Await the actual start_simulation task; no cancel-and-revise shortcut."""
     count = choose_customer_count(api, template['source'], seed, customer_count)
     config = api.SimulationConfig(template_id=template['id'], customer_count=count, target_messages=base.TARGET,
                                   allow_early_end=False, creation_mode='independent_random', variation_seed=seed,
                                   randomize_personas=True, dialogue_model=base.MODEL, reasoning_effort=base.EFFORT,
                                   story_world='', character_ids={}, personas={}, persona_cards={},
-                                  persona_sources={}, persona_versions={}, story_notes='')
+                                  persona_sources={}, persona_versions={}, story_notes=material_story_notes(material_notes))
     records, created = [], []
     original_create, original_review = api.create_run, api.review_dialogue
 
@@ -134,6 +220,10 @@ async def run_fresh(api, out, template, index, seed, code, template_sha, corpus_
             raise ValueError('独立生成必须以空对话、空故事、空记忆和新world开始')
         if not run.get('corpus_reference'):
             raise ValueError('独立生成必须实际加载公开语料参考')
+        if material_notes is not None:
+            actual_ids = [sample['id'] for sample in run['corpus_reference'].get('samples', [])]
+            if actual_ids != material_notes['selected_entry']['conversation_ids']:
+                raise ValueError('新任务实际语料抽样与选材注释不一致')
         run['version_record'] = {
             'version': f'V{index:02d}', 'series': SERIES, 'series_date': '20261015',
             'method': 'independent_generation', 'parent_run': None, 'parent_sha': None, 'parent_sha256': None,
@@ -143,6 +233,8 @@ async def run_fresh(api, out, template, index, seed, code, template_sha, corpus_
         }
         if attempt_label:
             run['version_record']['revision'] = attempt_label
+        if material_notes is not None:
+            run['version_record']['material_notes'] = material_provenance(material_notes)
         run['version_record']['seed_scope'] = 'random_configuration_only_not_model_output_reproduction'
         base.isolated_create(api, run)
         created.append(run['id'])
@@ -253,10 +345,20 @@ async def execute(args):
         corpus = load_corpus(corpus_path)
         corpus_evidence = {'path': str(corpus_path), 'file_sha256': base.sha(corpus_bytes),
                            'conversations': len(corpus['conversations']), 'sources': corpus['sources']}
-        base.save_json(out / 'input.json', {'series': SERIES, 'index': args.index, 'seed': args.seed,
-                                          'attempt_label': attempt_label,
-                                          'template_path': str(Path(args.template).resolve()), 'template_sha256': base.sha(payload),
-                                          'corpus': corpus_evidence, 'customer_count_override': args.customer_count})
+        material_notes = None
+        if getattr(args, 'material_notes', None) is not None:
+            if base.sha(corpus_path.read_bytes()) != corpus_evidence['file_sha256']:
+                raise ValueError('语料文件在选材校验前发生变化，拒绝错绑')
+            material_notes = read_material_notes(args.material_notes, args.index, args.seed, corpus,
+                                                 corpus_evidence['file_sha256'])
+            base.save_json(out / 'material-notes.json', material_notes)
+        inputs = {'series': SERIES, 'index': args.index, 'seed': args.seed,
+                  'attempt_label': attempt_label,
+                  'template_path': str(Path(args.template).resolve()), 'template_sha256': base.sha(payload),
+                  'corpus': corpus_evidence, 'customer_count_override': args.customer_count}
+        if material_notes is not None:
+            inputs['material_notes'] = material_provenance(material_notes)
+        base.save_json(out / 'input.json', inputs)
         api.put_template(template['id'], template['filename'], template['source'], template['analysis'])
     except BaseException as exc:
         failure = {'at': base.now(), 'series': SERIES, 'version': f'V{args.index:02d}', 'status': 'failed',
@@ -266,7 +368,8 @@ async def execute(args):
         print(json.dumps(failure, ensure_ascii=True))
         return 1
     return await run_fresh(api, out, template, args.index, args.seed, code, base.sha(payload),
-                           corpus_evidence, export_xlsx, args.customer_count, attempt_label=attempt_label)
+                           corpus_evidence, export_xlsx, args.customer_count, attempt_label=attempt_label,
+                           material_notes=material_notes)
 
 
 def main():
@@ -276,6 +379,7 @@ def main():
     parser.add_argument('--corpus-path', required=True, type=Path)
     parser.add_argument('--template', type=Path, default=DEFAULT_TEMPLATE)
     parser.add_argument('--customer-count', type=int, choices=range(1, 21))
+    parser.add_argument('--material-notes', type=Path, help='绑定本次seed与实际语料抽样的Agent选材注释JSON')
     parser.add_argument('--attempt-label', help='同一编号另建从零生成尝试，如V01-R001；不读旧稿，不另计独立编号')
     args = parser.parse_args()
     with base.exclusive_lock(base.ROOT / '.vimax/deploy/independent-locks' / f'V{args.index:02d}.lock'):

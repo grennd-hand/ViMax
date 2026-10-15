@@ -23,7 +23,7 @@ os.environ.update(SCRIPT_GENERATOR_DATA_DIR=str(Path(SANDBOX.name) / 'initial-ru
 sys.path[:0] = [str(driver.base.ROOT), str(driver.base.ROOT / 'dialogue/backend')]
 from app import main as api
 from app import vimax_engine as engine
-from app.dialogue_corpus import parse_lccc, save_corpus
+from app.dialogue_corpus import load_corpus, parse_lccc, sample_reference, save_corpus
 
 
 class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
@@ -32,7 +32,8 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.folder.cleanup)
         self.root = Path(self.folder.name)
         self.corpus_path = self.root / 'lccc.corpus.json'
-        save_corpus(parse_lccc([["周末去看电影么", "还没想好呢"], ["下雨了吗", "刚停雨"]],
+        save_corpus(parse_lccc([["周末去看电影么", "还没想好呢"], ["下雨了吗", "刚停雨"],
+                               ["想去看看海", "我喜欢听海浪"], ["今天就想偷个懒", "我也是"]],
                     {'name': 'offline-fixture', 'url': 'https://example.invalid/corpus', 'license': 'test fixture'}), self.corpus_path)
         self.initial = []
         self.worker_done = False
@@ -52,9 +53,36 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError('old dialogue read attempted')
         return self.original_read(path)
 
-    def args(self, index=1, seed='offline-seed', customer_count=None, attempt_label=None):
+    def args(self, index=1, seed='offline-seed', customer_count=None, attempt_label=None, material_notes=None):
         return SimpleNamespace(index=index, seed=seed, customer_count=customer_count, attempt_label=attempt_label,
-                               template=driver.DEFAULT_TEMPLATE, corpus_path=self.corpus_path)
+                               template=driver.DEFAULT_TEMPLATE, corpus_path=self.corpus_path, material_notes=material_notes)
+
+    def notes_fixture(self, index=1, seed='offline-seed'):
+        corpus = load_corpus(self.corpus_path)
+        corpus_sha = driver.base.sha(self.corpus_path.read_bytes())
+        samples = sample_reference(corpus, seed, count=4, max_turns=4)['samples']
+        sources = {source['source_id']: source for source in corpus['sources']}
+        entry = {'version': f'V{index:02d}', 'seed': seed, 'annotation_kind': 'agent_creative_inspiration',
+                 'read_selected_excerpts': True, 'corpus_sha256': corpus_sha,
+                 'conversation_ids': [sample['id'] for sample in samples], 'reference_bindings': [],
+                 'material_hints': [{'topic_hint': '海边的声音', 'creative_prompt': '惦记海浪声，不一定要马上出门。',
+                                    'expression_impulse': '表达向往', 'inspired_by_conversation_ids': [samples[0]['id']]},
+                                   {'topic_hint': '偷懒的快乐', 'creative_prompt': '有时只想轻轻松松待一会儿。',
+                                    'expression_impulse': '分享心情', 'inspired_by_conversation_ids': [samples[1]['id']]}]}
+        for sample in samples:
+            entry['reference_bindings'].append({'conversation_id': sample['id'],
+                'conversation_content_sha256': sample['content_sha256'], 'excerpt_start': sample['excerpt_start'],
+                'source_turn_indexes': [turn['source_turn_index'] for turn in sample['turns']],
+                'source_sha256_bindings': [{'source_id': a['source_id'], 'source_record_index': a['source_record_index'],
+                    'source_sha256': sources[a['source_id']]['source_sha256']} for a in sample['attributions']]})
+        document = {'schema_version': 1, 'annotation_kind': 'agent_creative_inspiration',
+                    'not_original_dialogue': True, 'corpus_sha256': corpus_sha, 'entries': [entry]}
+        return document, corpus
+
+    def write_notes(self, document):
+        path = self.root / 'seed-material-notes.json'
+        path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        return path
 
     async def review(self, template, run):
         self.assertEqual(len(run['messages']), 150)
@@ -140,6 +168,9 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run['config']['dialogue_model'], 'gpt-6-sol')
         self.assertEqual(run['config']['reasoning_effort'], 'high')
         self.assertEqual(run['config']['target_messages'], 150)
+        self.assertEqual(run['config']['story_notes'], '')
+        self.assertNotIn('material_notes', run['version_record'])
+        self.assertFalse((out / 'material-notes.json').exists())
         self.assertTrue(run['config']['randomize_personas'])
         self.assertEqual(run['program_review_history'][0]['messages_sha256'], driver.messages_hash(run['messages']))
         self.assertEqual(run['program_review_history'][0]['state'], 'returned')
@@ -151,6 +182,60 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(driver.base.sha((out / 'sources' / relative).read_bytes()), digest)
         self.assertIn('.vimax/deploy/generate-independent.py', provenance['source_hashes'])
         self.assertEqual((out / 'template.json').read_bytes(), driver.DEFAULT_TEMPLATE.read_bytes())
+
+    async def test_bound_agent_notes_drive_only_fresh_story_notes_and_are_archived_verbatim(self):
+        document, _ = self.notes_fixture()
+        path = self.write_notes(document)
+        original_bytes = path.read_bytes()
+        code, _ = await self.invoke(self.args(material_notes=path))
+        self.assertEqual(code, 0)
+        out = self.root / 'outputs/独立随机-20261015/V01'
+        run = json.loads((out / 'run.json').read_bytes())
+        archive = json.loads((out / 'material-notes.json').read_bytes())
+        self.assertEqual(archive['selected_entry'], document['entries'][0])
+        self.assertEqual(archive['source_file_sha256'], driver.base.sha(original_bytes))
+        self.assertEqual(path.read_bytes(), original_bytes)
+        self.assertIn('Agent创作启发，非原语料/当前人物事实', self.initial[0]['config']['story_notes'])
+        self.assertIn('惦记海浪声', run['config']['story_notes'])
+        self.assertNotIn('reference_bindings', run['config']['story_notes'])
+        self.assertIn('不规定事件顺序、操作者', run['config']['story_notes'])
+        self.assertEqual(run['version_record']['material_notes'], json.loads((out / 'input.json').read_bytes())['material_notes'])
+        self.assertEqual(run['version_record']['material_notes']['source_file_sha256'], driver.base.sha(original_bytes))
+        self.assertEqual(run['corpus_reference']['seed'], 'offline-seed')
+        self.assertEqual([s['id'] for s in run['corpus_reference']['samples']], document['entries'][0]['conversation_ids'])
+        self.assertIn('material-notes.json', json.loads((out / 'hashes.json').read_bytes()))
+
+    def test_material_notes_reject_misbound_seed_sha_ids_missing_fields_and_duplicates(self):
+        original, corpus = self.notes_fixture()
+        mutations = [
+            lambda d: d['entries'][0].update(seed='wrong-seed'),
+            lambda d: d.update(corpus_sha256='wrong-sha'),
+            lambda d: d['entries'][0].update(corpus_sha256='wrong-sha'),
+            lambda d: d['entries'][0]['conversation_ids'].__setitem__(0, 'wrong-id'),
+            lambda d: d['entries'][0]['reference_bindings'][0]['source_sha256_bindings'][0].update(source_sha256='wrong-sha'),
+            lambda d: d['entries'][0].pop('reference_bindings'),
+            lambda d: d['entries'][0]['material_hints'][0].pop('expression_impulse'),
+            lambda d: d['entries'][0]['material_hints'][0].update(inspired_by_conversation_ids=['foreign-id']),
+            lambda d: d.update(annotation_kind='original_dialogue'),
+            lambda d: d.pop('not_original_dialogue'),
+            lambda d: d['entries'].append(copy.deepcopy(d['entries'][0])),
+        ]
+        for index, mutate in enumerate(mutations):
+            document = copy.deepcopy(original)
+            mutate(document)
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                driver.read_material_notes(self.write_notes(document), 1, 'offline-seed', corpus,
+                                           driver.base.sha(self.corpus_path.read_bytes()))
+
+    async def test_material_binding_failure_never_starts_a_generation_task(self):
+        document, _ = self.notes_fixture()
+        document['entries'][0]['seed'] = 'wrong-seed'
+        code, _ = await self.invoke(self.args(material_notes=self.write_notes(document)))
+        self.assertEqual(code, 1)
+        self.assertFalse(self.initial)
+        out = self.root / 'outputs/独立随机-20261015/V01'
+        self.assertFalse((out / 'run-id.txt').exists())
+        self.assertEqual(json.loads((out / 'failure.json').read_bytes())['phase'], 'setup')
 
     async def test_two_indices_create_distinct_worlds_and_do_not_overwrite(self):
         await self.invoke(self.args(1, 'first'))
