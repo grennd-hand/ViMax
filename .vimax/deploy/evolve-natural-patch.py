@@ -54,7 +54,7 @@ def parse_ranges(value):
     return sorted(sequences)
 
 
-def build_request(engine, template, editing, issues, allowed):
+def build_request(engine, template, editing, issues, allowed, reply_only_revision=False):
     request = engine.writing_contract(template, editing)
     context = engine.rolling_context(editing, editing['messages'])
     request += '\n父版本完整150条公开对话：' + json.dumps(context['public_history'], ensure_ascii=False)
@@ -73,7 +73,9 @@ def build_request(engine, template, editing, issues, allowed):
                 '不能把后段信息、别人的私有动机或编剧所见母本当作人物已知。'
                 '逐句核对指代、动作对象、比较参照和时间前因，保留正常已知信息的自然省略。'
                 '保持母本原值、同人物的截图/提交因果、人格关注点与已作选择；不伪造付款或外部审批。'
-                '没有必要修改的行不要返回；不能只调间隔、回复编号或近义替换以冒充解决问题。')
+                '没有必要修改的行不要返回；')
+    request += ('本次显式reply-only修订按后续回复关系规则执行，不计新内容。' if reply_only_revision else
+                '不能只调间隔、回复编号或近义替换以冒充解决问题。')
     request += '\n每条修改行格式：' + engine.output_format(editing)
     return request
 
@@ -115,12 +117,44 @@ def apply_delay_policy(replacements, parent_messages, preserve_delay=False):
     return changes
 
 
-async def patch_once(api, engine, template, run, parent_messages, issues, chat, allowed, preserve_delay=False):
+def validate_reply_revision(record):
+    family = record.get('version', '')
+    parent = re.fullmatch(r'(V[0-9]{2})(?:-(R[0-9]{3}))?', record.get('parent_version', ''))
+    revision = record.get('revision')
+    if (not re.fullmatch(r'V[0-9]{2}', family) or not parent or parent[1] != family
+            or not revision or base.revision_number(revision) <= base.revision_number(parent[2])):
+        raise ValueError('reply-only 仅允许同family严格前向的显式revision')
+
+
+def retain_reply_only(replacements, parent_messages):
+    # The wire format has only these public fields. Unknown backend fields must
+    # survive byte-for-value from the complete parent object, never be decoded anew.
+    fields = ('seq', 'sender', 'content', 'delay', 'stage', 'type', 'image_code', 'image_mode', 'replace_date')
+    for seq, replacement in list(replacements.items()):
+        parent = parent_messages[seq - 1]
+        drift = [key for key in fields if replacement.get(key) != parent.get(key)]
+        if drift:
+            raise ValueError(f'reply-only 编号{seq}含非reply_to变化：' + ','.join(drift))
+        reply = replacement.get('reply_to')
+        if reply is not None and (type(reply) is not int or not 1 <= reply < seq):
+            raise ValueError(f'reply-only 编号{seq}回复对象必须是此前消息')
+        replacements[seq] = copy.deepcopy(parent)
+        replacements[seq]['reply_to'] = reply
+
+
+async def patch_once(api, engine, template, run, parent_messages, issues, chat, allowed, preserve_delay=False, reply_only_revision=False):
     if len(parent_messages) != base.TARGET or [m.get('seq') for m in parent_messages] != list(range(1, 151)):
         raise ValueError('scoped_patch 只接受编号1至150的完整父稿')
+    if reply_only_revision:
+        validate_reply_revision(run['version_record'])
+        if not preserve_delay:
+            raise ValueError('reply-only 必须沿用父稿delay')
     run['version_record'].update(method='scoped_patch', editable_sequences=list(allowed),
                                  delay_policy='parent' if preserve_delay else 'model',
                                  patch_policy='one ViMax scoped edit, immutable outside lines, one full program review')
+    run['version_record']['reply_only_revision'] = reply_only_revision
+    if reply_only_revision:
+        run['version_record'].update(revision_kind='reply_only_correction', counts_as_new_content=False)
     run['scoped_patch'] = {'editable_sequences': list(allowed), 'changed_sequences': [],
                             'parent_content_sha256': base.content_fingerprint({'messages': parent_messages})}
     api.save_run(run)
@@ -130,7 +164,10 @@ async def patch_once(api, engine, template, run, parent_messages, issues, chat, 
     try:
         writer = engine.screenwriter_class()(chat_model=engine.RecordedChat(chat, api, run['id'], 'scoped_patch'))
         method = writer.write_script_based_on_story
-        request = build_request(engine, template, editing, issues, allowed)
+        request = build_request(engine, template, editing, issues, allowed, reply_only_revision)
+        if reply_only_revision:
+            request += ('\n显式reply-only修订：只纠正问题清单中错误的reply_to。必须逐字沿用父稿正文、发言人、阶段和媒体，'
+                        '仅返回需校正的原编号行；这次回复关系修订不另计新内容版本。')
         if preserve_delay:
             request += '\n本次显式使用parent-delay策略：最终稿确定性沿用每个原编号的父稿delay，原始模型delay仍归档；不要用间隔变化代替正文收益。'
         # Upstream Screenwriter has a three-attempt tenacity decorator. Bypass
@@ -145,6 +182,8 @@ async def patch_once(api, engine, template, run, parent_messages, issues, chat, 
         api.save_run(latest)
         replacements = decode_patch(engine, scenes, editing, set(allowed))
         retained_delays = apply_delay_policy(replacements, parent_messages, preserve_delay)
+        if reply_only_revision:
+            retain_reply_only(replacements, parent_messages)
         merged = copy.deepcopy(parent_messages)
         for seq, replacement in replacements.items():
             merged[seq - 1] = replacement
@@ -166,7 +205,9 @@ async def patch_once(api, engine, template, run, parent_messages, issues, chat, 
         # Capture the actual merged full draft before structural rejection. The
         # existing archive retains raw attempted wording and media in JSON/XLSX/MD.
         engine.checkpoint_candidate(api, latest, merged, 'scoped_patch 完整150条合并候选，尚未合同检查')
-        if base.content_fingerprint({'messages': merged}) == base.content_fingerprint({'messages': parent_messages}):
+        if reply_only_revision and not changed:
+            raise base.NoChangeError('reply-only 未产生回复关系变化；仅保留尝试')
+        if not reply_only_revision and base.content_fingerprint({'messages': merged}) == base.content_fingerprint({'messages': parent_messages}):
             raise base.NoChangeError('局部响应正文、发言人与媒体未变；仅保留尝试，不计新完整版本')
         errors = engine.contract_errors(template['source'], {**latest, 'messages': merged, 'status': 'completed'})
         if errors:
@@ -208,7 +249,9 @@ async def deferred_review(api, engine, template, run):
     api.save_run(run)
 
 
-def install_hooks(out, allowed, review_mode='full', resume_review=False, branch_from_reviewed_best=False, preserve_delay=False):
+def install_hooks(out, allowed, review_mode='full', resume_review=False, branch_from_reviewed_best=False, preserve_delay=False, reply_only_revision=False):
+    if reply_only_revision and (review_mode != 'full' or not preserve_delay):
+        raise ValueError('reply-only 必须使用full复核和preserve-delay')
     original_provenance = base.provenance
     original_review = base.review_only
     original_read_inputs = base.read_inputs
@@ -231,12 +274,13 @@ def install_hooks(out, allowed, review_mode='full', resume_review=False, branch_
                       delay_policy='parent' if preserve_delay else 'model',
                       review_mode='full' if resume_review else review_mode,
                       branch_mode=branch_mode, target_version=out.name)
+        result['reply_only_revision'] = reply_only_revision
         return result
 
     async def revision_once(api, engine, template, run, parent_messages, issues, chat):
         run['version_record']['review_mode'] = review_mode
         run['version_record'].update(branch_mode=branch_mode, target_version=out.name)
-        return await patch_once(api, engine, template, run, parent_messages, issues, chat, allowed, preserve_delay)
+        return await patch_once(api, engine, template, run, parent_messages, issues, chat, allowed, preserve_delay, reply_only_revision)
 
     async def review_only(api, engine, template, run):
         if review_mode == 'deferred' and not resume_review:
@@ -250,10 +294,15 @@ def install_hooks(out, allowed, review_mode='full', resume_review=False, branch_
     base.provenance = provenance
     base.revision_once = revision_once
     base.review_only = review_only
-    if branch_from_reviewed_best:
+    if branch_from_reviewed_best or reply_only_revision:
         def read_inputs(parent_path, issues_path, version, revision_label=None):
-            return original_read_inputs(parent_path, issues_path, version,
-                                        allow_reviewed_best=True, revision_label=revision_label)
+            result = original_read_inputs(parent_path, issues_path, version,
+                                          allow_reviewed_best=branch_from_reviewed_best, revision_label=revision_label)
+            if reply_only_revision:
+                parent_record = result[0]['version_record']
+                validate_reply_revision({'version': f'V{version:02d}', 'revision': revision_label,
+                    'parent_version': parent_record['version'] + ('-' + parent_record['revision'] if parent_record.get('revision') else '')})
+            return result
         base.read_inputs = read_inputs
 
 
@@ -273,10 +322,13 @@ def main():
     parser.add_argument('--resume-review', action='store_true')
     parser.add_argument('--revision-label', help='另建修订目录如V40-R001；同family父稿必须较早revision，原稿不覆盖')
     parser.add_argument('--preserve-delay', action='store_true', help='只改正文时，确定性沿用父稿各编号delay；原始模型值和保留策略单独归档')
+    parser.add_argument('--reply-only-revision', action='store_true', help='仅同family前向revision纠正回复关系，父稿其余完整对象不变，不另计新内容')
     parser.add_argument('--branch-from-reviewed-best', action='store_true',
                         help='从编号更早且已双人全文审阅的真实最佳基线创建独立备选；每个V独立锁')
     args = parser.parse_args()
     base.revision_number(args.revision_label)
+    if args.reply_only_revision and not args.revision_label:
+        raise ValueError('reply-only 必须显式指定revision-label')
     allowed = parse_ranges(args.editable_ranges)
     if args.version == 40 and args.review_mode != 'full' and not args.resume_review:
         raise ValueError('V40 必须真实执行 full 全量程序复核')
@@ -289,10 +341,11 @@ def main():
         if args.resume_review:
             stored = json.loads((out / 'run.json').read_bytes())
             args.preserve_delay = stored.get('version_record', {}).get('delay_policy') == 'parent'
+            args.reply_only_revision = stored.get('version_record', {}).get('reply_only_revision', False)
             if (stored.get('version_record', {}).get('method') != 'scoped_patch'
                     or stored['version_record'].get('editable_sequences') != allowed):
                 raise ValueError('只能恢复同一个 scoped_patch 版本及原修改窗口的程序复核')
-        install_hooks(out, allowed, args.review_mode, args.resume_review, args.branch_from_reviewed_best, args.preserve_delay)
+        install_hooks(out, allowed, args.review_mode, args.resume_review, args.branch_from_reviewed_best, args.preserve_delay, args.reply_only_revision)
         result = asyncio.run(base.execute(args))
         if args.review_mode == 'deferred' and not args.resume_review and result == 1:
             run = json.loads((out / 'run.json').read_bytes())

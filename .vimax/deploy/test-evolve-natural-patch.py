@@ -47,13 +47,13 @@ class PatchTests(unittest.IsolatedAsyncioTestCase):
                 return scenes
         return Writer
 
-    async def apply(self, run, scenes, allowed, contract_errors=(), preserve_delay=False):
+    async def apply(self, run, scenes, allowed, contract_errors=(), preserve_delay=False, reply_only_revision=False):
         calls = []
         with patch.object(engine, 'screenwriter_class', return_value=self.writer(scenes, calls)), \
              patch.object(engine, 'contract_errors', return_value=list(contract_errors)):
             result = await driver.patch_once(api, engine, self.template, run, self.previous['messages'],
                                             [{'seq': allowed[0], 'reason': 'offline actual test issue'}],
-                                            fixture.FakeChat(), allowed, preserve_delay)
+                                            fixture.FakeChat(), allowed, preserve_delay, reply_only_revision)
         return result, calls
 
     async def test_parent_delay_policy_preserves_raw_and_archives_actual_merged_delay(self):
@@ -94,7 +94,8 @@ class PatchTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(driver, 'install_hooks') as hooks, patch('sys.argv', argv):
                 self.assertEqual(driver.main(), 0)
                 self.assertEqual(hooks.call_args.args[0].name, 'V32-R001')
-                self.assertTrue(hooks.call_args.args[-1])
+                self.assertTrue(hooks.call_args.args[-2])
+                self.assertFalse(hooks.call_args.args[-1])
             self.assertEqual(original.read_bytes(), b'original preserved')
 
     async def test_child_preserves_revision_parent_identity(self):
@@ -166,6 +167,73 @@ class PatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actual['messages'], [])
         self.assertTrue(actual['unchanged_parent_candidate'])
         self.assertEqual(len(actual['candidate_versions']), 1)
+
+    async def reply_child(self):
+        run = await self.child()
+        run['version_record'].update(version='V40', revision='R005', parent_version='V40-R004')
+        api.save_run(run)
+        return run
+
+    def reply_line(self, reply, content=None):
+        original = self.previous['messages'][31]
+        return f"032|{original['sender']}|{reply or 0}|0|{original['stage']}|文本|-|{original['content'] if content is None else content}"
+
+    async def test_reply_revision_preserves_every_parent_field_and_raw_but_not_new_content(self):
+        run = await self.reply_child()
+        before = copy.deepcopy(self.previous['messages'])
+        # Simulate backend-only metadata absent from model line format.
+        self.previous['messages'][31]['offline_extra'] = {'immutable': [1, 2]}
+        try:
+            expected = copy.deepcopy(self.previous['messages'])
+            target = 30 if expected[31].get('reply_to') != 30 else 29
+            expected[31]['reply_to'] = target
+            scenes = [self.reply_line(target)]
+            result, calls = await self.apply(run, scenes, [32], preserve_delay=True, reply_only_revision=True)
+            self.assertEqual(result['messages'], expected)
+            self.assertEqual(result['scoped_patch']['raw_patch_scenes'], scenes)
+            self.assertEqual(result['scoped_patch']['changed_sequences'], [32])
+            self.assertEqual(result['scoped_patch']['content_changed_sequences'], [])
+            self.assertFalse(result['version_record']['counts_as_new_content'])
+            self.assertIn('显式reply-only修订', calls[0])
+            self.assertNotIn('不能只调间隔、回复编号', calls[0])
+            archived = json.loads((api.DATA_DIR / result['candidate_versions'][0]['path'] / 'run.json').read_bytes())
+            self.assertEqual(archived['messages'], expected)
+        finally:
+            self.previous['messages'] = before
+
+    async def test_reply_revision_rejects_noop_content_drift_and_invalid_target(self):
+        original = self.previous['messages'][31]
+        cases = [(self.reply_line(original.get('reply_to')), driver.base.NoChangeError, '未产生'),
+                 (self.reply_line(30, '正文不能漂移。'), ValueError, 'content'),
+                 (self.reply_line(32), ValueError, '未出现|此前消息')]
+        for line, error, reason in cases:
+            with self.subTest(reason=reason):
+                run = await self.reply_child()
+                with self.assertRaisesRegex(error, reason):
+                    await self.apply(run, [line], [32], preserve_delay=True, reply_only_revision=True)
+                self.assertEqual(api.get_run(run['id'])['messages'], [])
+
+    async def test_reply_revision_rejects_cross_family_nonrevision_and_rollback_before_model(self):
+        for changes in ({'parent_version': 'V39-R004'}, {'revision': None}, {'revision': 'R004'}, {'revision': 'R003'}):
+            with self.subTest(changes=changes):
+                run = await self.reply_child()
+                run['version_record'].update(changes)
+                with self.assertRaisesRegex(ValueError, '同family'):
+                    await self.apply(run, [self.reply_line(30)], [32], preserve_delay=True, reply_only_revision=True)
+                self.assertFalse(api.get_run(run['id']).get('vimax_samples'))
+
+    def test_reply_revision_requires_full_and_delay_retention(self):
+        for mode, delay in [('deferred', True), ('full', False)]:
+            with self.assertRaisesRegex(ValueError, 'full'):
+                driver.install_hooks(Path('V40-R005'), [90], mode, preserve_delay=delay, reply_only_revision=True)
+
+    def test_reply_cli_requires_explicit_revision_before_execution(self):
+        argv = ['evolve-natural-patch.py', '--version', '40', '--parent', 'parent.json',
+                '--issues', 'issues.json', '--editable-ranges', '90', '--reply-only-revision', '--preserve-delay']
+        with patch('sys.argv', argv), patch.object(driver.base, 'execute') as execute:
+            with self.assertRaisesRegex(ValueError, 'revision-label'):
+                driver.main()
+            execute.assert_not_called()
 
     async def test_deferred_never_calls_review_or_fabricates_pass(self):
         run = await self.child()
