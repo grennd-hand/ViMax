@@ -27,6 +27,7 @@ from .locale import language_context, message_char_limit, normalize_language
 from .persona_library import default_cards, default_entries, persona_library
 from .opening import opening_policy, opening_requirement, opening_schedule
 from .conversation_flow import naturalness_evidence
+from .model_stream import stream_model_content
 from .persona_memory import record_public_memory
 from .memory_store import SQLiteMemoryStore, bind_characters, init_memory_schema, normalize_reflections, reflection_due, sync_accepted_memory
 from .memory_cognition import prepare_memory_context
@@ -222,7 +223,7 @@ def model_reasoning_effort(config: dict | None = None) -> str | None:
 
 
 async def model_json(system: str, payload: dict, *, temperature: float = 0.7, model_name: str | None = None,
-                     call_budget_seconds: float | None = None) -> dict:
+                     call_budget_seconds: float | None = None, stream: bool = False) -> dict:
     base, key, name = model_settings()
     name = model_name or name
     headers = {"Content-Type": "application/json"}
@@ -255,8 +256,12 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                 if remaining <= 0.01:
                     raise RuntimeError(f"模型接口超过总等待上限：{failure}")
                 try:
-                    response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
-                                                 timeout=min(request_timeout, remaining))
+                    if stream:
+                        response, content = await stream_model_content(
+                            client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline)
+                    else:
+                        response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
+                                                     timeout=min(request_timeout, remaining))
                     if response.status_code == 400 and "reasoning_effort" in body:
                         try:
                             error = response.json().get("error", {})
@@ -268,10 +273,15 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                                 raise RuntimeError("模型接口不支持所选推理强度，未自动降低强度")
                             _reasoning_unsupported.add((base, candidate))
                             body.pop("reasoning_effort")
-                            response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
-                                                         timeout=max(.01, min(request_timeout, deadline - time.monotonic())))
+                            if stream:
+                                response, content = await stream_model_content(
+                                    client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline)
+                            else:
+                                response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
+                                                             timeout=max(.01, min(request_timeout, deadline - time.monotonic())))
                     response.raise_for_status()
-                    content = response.json()["choices"][0]["message"]["content"]
+                    if not stream:
+                        content = response.json()["choices"][0]["message"]["content"]
                     if isinstance(content, list):
                         content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                     content = str(content).strip()
@@ -296,7 +306,7 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                     failure = f"模型 {candidate} 返回 HTTP {status}"
                     if status not in {429, 500, 502, 503, 504}:
                         raise RuntimeError(failure) from exc
-                except httpx.TimeoutException:
+                except (httpx.TimeoutException, TimeoutError):
                     failure = f"模型 {candidate} 请求超时"
                 except (httpx.TransportError, json.JSONDecodeError, KeyError, IndexError, ValueError):
                     failure = f"模型 {candidate} 连接中断或返回格式无效"
@@ -834,7 +844,8 @@ async def review_dialogue(template: dict, run: dict) -> dict:
                       for m in run["messages"]]}, temperature=0.1,
         model_name=os.getenv("MODEL_REVIEW_NAME"),
         call_budget_seconds=float(os.getenv('MODEL_CALL_BUDGET_SECONDS', '180'))
-        if run['config'].get('dialogue_flow_version', 1) >= 4 else 180)
+        if run['config'].get('dialogue_flow_version', 1) >= 4 else 180,
+        stream=run['config'].get('dialogue_flow_version', 1) >= 4)
     issues = result.get("issues", [])
     if not isinstance(issues, list):
         raise ValueError("整段对话复核未返回问题列表")

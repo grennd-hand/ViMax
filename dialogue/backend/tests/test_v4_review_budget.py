@@ -1,8 +1,15 @@
 import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app import main
+_test_data = tempfile.TemporaryDirectory()
+with patch.dict(os.environ, {'SCRIPT_GENERATOR_DATA_DIR': _test_data.name}):
+    from app import main
+
+
+def tearDownModule():
+    _test_data.cleanup()
 
 
 class ReviewBudgetTests(unittest.IsolatedAsyncioTestCase):
@@ -15,3 +22,4 @@ class ReviewBudgetTests(unittest.IsolatedAsyncioTestCase):
                 await main.review_dialogue(template, run)
             self.assertEqual(model.await_count, 1)
             self.assertEqual(model.call_args.kwargs['call_budget_seconds'], expected)
+            self.assertEqual(model.call_args.kwargs['stream'], version >= 4)
