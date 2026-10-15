@@ -220,7 +220,7 @@ def isolated_create(api, run):
 async def create_child(api, previous, template, version, parent_hash, evidence, code):
     config = {k: copy.deepcopy(v) for k, v in previous['config'].items() if k in api.SimulationConfig.model_fields}
     config.update(template_id=template['id'], target_messages=TARGET, dialogue_model=MODEL,
-                  reasoning_effort=EFFORT, character_ids={}, story_world=f'natural-20261015-v{version:02d}-{uuid.uuid4().hex[:12]}')
+                  reasoning_effort=EFFORT, creation_mode='fixed', character_ids={}, story_world=f'natural-20261015-v{version:02d}-{uuid.uuid4().hex[:12]}')
     original_create = api.create_run
     api.create_run = lambda run: isolated_create(api, run)
     try:
@@ -296,7 +296,8 @@ def capture_artifacts(api, out, run, export_xlsx):
             atomic(path, payload)
     if len(run.get('messages', [])) == TARGET:
         atomic(out / '群聊150条.xlsx', export_xlsx(run))
-        lines = []
+        lines = (['# 虚构示例／内部排练稿', '人物及其行为均为虚构情节，不代表真实参与记录。']
+                 if run.get('config', {}).get('usage_context') == 'fictional_rehearsal' else [])
         for message in run['messages']:
             lines.append(f"{message['seq']:03d} **{message['sender']}**：{message['content']}")
             if message.get('image_code'):

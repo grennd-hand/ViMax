@@ -69,8 +69,10 @@ def _write(path: Path, payload: bytes) -> None:
         os.fsync(stream.fileno())
 
 
-def _markdown(record: dict, messages: list[dict]) -> bytes:
+def _markdown(record: dict, messages: list[dict], fictional: bool = False) -> bytes:
     lines = [f"# {record['version']} · 捕获状态：{record['capture_status']}", ""]
+    if fictional:
+        lines.extend(['虚构示例／内部排练稿；人物及行为为虚构情节，不代表真实参与记录。', ''])
     for message in messages:
         reply = message.get("reply_to")
         suffix = f"（回复第 {reply} 条）" if reply is not None else ""
@@ -168,7 +170,7 @@ def archive_candidate(data_dir: Path, run: dict, messages: list[dict], reason: s
             for message in captured["messages"]]}
         artifacts = {
             "run.json": _json_bytes(captured),
-            "messages.md": _markdown(record, captured["messages"]),
+            "messages.md": _markdown(record, captured["messages"], captured.get('config', {}).get('usage_context') == 'fictional_rehearsal'),
             "messages.xlsx": export_xlsx(table),
         }
         manifest = {"schema_version": 1, "record": record, "message_count": len(messages),

@@ -27,17 +27,21 @@ from .locale import language_context, message_char_limit, normalize_language
 from .persona_library import default_cards, default_entries, persona_library
 from .opening import opening_policy, opening_requirement, opening_schedule
 from .conversation_flow import naturalness_evidence
-from .model_stream import stream_model_content
+from .model_stream import ModelRefusalError, check_model_refusal, plain_text_refusal, safe_model_reason, stream_model_content
 from .persona_memory import record_public_memory
 from .memory_store import SQLiteMemoryStore, bind_characters, init_memory_schema, normalize_reflections, reflection_due, sync_accepted_memory
 from .memory_cognition import prepare_memory_context
 from .scene_memory import apply_review_actions, apply_review_decisions, apply_review_progress, decision_ledger, scene_candidates, scene_ledger
 from .story_arc import fallback_story_arc, normalize_story_arc, normalize_story_topics, source_topic_arc
 from .team import _public_role_status, _task_state, generate_team_batch, goal_requires_action
+from .creative_variation import create_variation_plan, validate_fresh_input
+from .independent_writing import REVIEW_PROMPT as INDEPENDENT_REVIEW_PROMPT
+from .dialogue_corpus import load_corpus, sample_reference
 
 APP_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("SCRIPT_GENERATOR_DATA_DIR", APP_DIR.parents[0] / ".vimax" / "dialogue"))
 DB_PATH = DATA_DIR / "app.sqlite3"
+CORPUS_PATH = Path(os.getenv("DIALOGUE_CORPUS_FILE", DATA_DIR / "dialogue-corpus" / "lccc.json"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="剧本对话模拟器")
@@ -47,6 +51,8 @@ tasks: dict[str, asyncio.Task] = {}
 _reasoning_unsupported: set[tuple[str, str]] = set()
 _run_model_client: ContextVar[httpx.AsyncClient | None] = ContextVar("run_model_client", default=None)
 _run_reasoning_effort: ContextVar[str | None] = ContextVar("run_reasoning_effort", default=None)
+_run_allow_done_without_stop: ContextVar[bool] = ContextVar("run_allow_done_without_stop", default=False)
+_run_stream_protocol_records: ContextVar[list | None] = ContextVar("run_stream_protocol_records", default=None)
 
 
 @contextmanager
@@ -139,7 +145,9 @@ def save_run(run: dict) -> None:
             folder = index.working_dir(run["vimax_project_id"]) / "dialogue"
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "messages.json").write_text(json.dumps(run["messages"], ensure_ascii=False, indent=2), encoding="utf-8")
-            (folder / "messages.md").write_text("\n\n".join(f"{m['seq']} **{m['sender']}**：{m['content']}" for m in run["messages"]), encoding="utf-8")
+            prefix = ("# 虚构示例／内部排练稿\n\n人物及行为为虚构情节，不代表真实参与记录。\n\n"
+                      if run['config'].get('usage_context') == 'fictional_rehearsal' else '')
+            (folder / "messages.md").write_text(prefix + "\n\n".join(f"{m['seq']} **{m['sender']}**：{m['content']}" for m in run["messages"]), encoding="utf-8")
             (folder / "messages.xlsx").write_bytes(export_xlsx(run))
 
 
@@ -149,7 +157,9 @@ def create_run(run: dict) -> None:
     if str(root) not in sys.path: sys.path.insert(0, str(root))
     from agent_runtime.session_index import SessionIndex
     run["vimax_project_id"] = "dialogue-" + run["id"]
-    SessionIndex(root).create(session_id=run["vimax_project_id"], project_name="母本群聊", idea=get_template(run["template_id"])["analysis"]["primary_goal"], style="dialogue")
+    variation = run.get("creative_variation")
+    title = "独立随机 · " + variation["style_label"] if variation else "母本群聊"
+    SessionIndex(root).create(session_id=run["vimax_project_id"], project_name=title, idea=get_template(run["template_id"])["analysis"]["primary_goal"], style="dialogue")
     with db() as connection:
         bind_characters(connection, run)
         connection.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)",
@@ -158,6 +168,8 @@ def create_run(run: dict) -> None:
 
 def cached_story_arc(run: dict) -> list[dict] | None:
     """Reuse a source-backed plot only for the same source, cast, language and persona snapshot."""
+    if run.get("config", {}).get("creation_mode") == "independent_random":
+        return None
     keys = ("target_messages", "customer_count", "language", "story_notes", "persona_cards")
     with db() as connection:
         rows = connection.execute("SELECT run_json FROM sessions WHERE template_id=? AND id<>? "
@@ -258,10 +270,16 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                 try:
                     if stream:
                         response, content = await stream_model_content(
-                            client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline)
+                            client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline,
+                            allow_done_without_stop=_run_allow_done_without_stop.get())
                     else:
                         response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
                                                      timeout=min(request_timeout, remaining))
+                    if not response.is_success:
+                        try:
+                            check_model_refusal(response.json(), secrets=(base, key))
+                        except (ValueError, AttributeError):
+                            pass
                     if response.status_code == 400 and "reasoning_effort" in body:
                         try:
                             error = response.json().get("error", {})
@@ -275,18 +293,34 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                             body.pop("reasoning_effort")
                             if stream:
                                 response, content = await stream_model_content(
-                                    client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline)
+                                    client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline,
+                                    allow_done_without_stop=_run_allow_done_without_stop.get())
                             else:
                                 response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
                                                              timeout=max(.01, min(request_timeout, deadline - time.monotonic())))
+                    protocol = response.extensions.get('vimax_stream_protocol') if stream else None
+                    protocol_records = _run_stream_protocol_records.get()
+                    if protocol is not None and protocol_records is not None:
+                        protocol_records.append({'model': candidate, **protocol})
+                    if not response.is_success:
+                        try:
+                            check_model_refusal(response.json(), secrets=(base, key))
+                        except (ValueError, AttributeError):
+                            pass
                     response.raise_for_status()
                     if not stream:
-                        content = response.json()["choices"][0]["message"]["content"]
+                        completion = response.json()
+                        check_model_refusal(completion, secrets=(base, key))
+                        choice = completion["choices"][0]
+                        check_model_refusal(choice, secrets=(base, key))
+                        content = choice["message"]["content"]
                     if isinstance(content, list):
                         content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
                     content = str(content).strip()
                     if content.startswith("```"):
                         content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
+                    if plain_text_refusal(content):
+                        raise ModelRefusalError('refusal', content, secrets=(base, key))
                     try:
                         result = json.loads(content)
                     except json.JSONDecodeError:
@@ -299,8 +333,13 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                     if isinstance(result, list) and payload.get("scene_draft"):
                         result = {"turns": result}
                     if not isinstance(result, dict):
+                        if plain_text_refusal(result):
+                            raise ModelRefusalError('refusal', result, secrets=(base, key))
                         raise ValueError("模型未返回 JSON 对象")
                     return result
+                except ModelRefusalError as exc:
+                    # A terminal refusal must not try another route or lower effort.
+                    raise ModelRefusalError(exc.kind, exc.detail, secrets=(base, key)) from None
                 except httpx.HTTPStatusError as exc:
                     status = exc.response.status_code
                     failure = f"模型 {candidate} 返回 HTTP {status}"
@@ -308,8 +347,14 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                         raise RuntimeError(failure) from exc
                 except (httpx.TimeoutException, TimeoutError):
                     failure = f"模型 {candidate} 请求超时"
-                except (httpx.TransportError, json.JSONDecodeError, KeyError, IndexError, ValueError):
-                    failure = f"模型 {candidate} 连接中断或返回格式无效"
+                except httpx.TransportError:
+                    failure = f"模型 {candidate} 连接中断或传输失败"
+                except json.JSONDecodeError as exc:
+                    detail = safe_model_reason(f"{type(exc).__name__}: {exc}", secrets=(base, key))
+                    failure = f"模型 {candidate} 返回的 JSON 无效：{detail}"
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    detail = safe_model_reason(f"{type(exc).__name__}: {exc}", secrets=(base, key))
+                    failure = f"模型 {candidate} 返回的响应结构或流式格式无效：{detail}"
             if attempt == 0 and deadline - time.monotonic() > 1:
                 await asyncio.sleep(1)
     finally:
@@ -397,6 +442,10 @@ class SimulationConfig(BaseModel):
     language: str = "zh-CN"
     dialogue_model: Literal["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol"] | None = None
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    creation_mode: Literal["independent_random", "fixed"] = "independent_random"
+    variation_seed: str | None = Field(default=None, max_length=80)
+    randomize_personas: bool = True
+    usage_context: Literal["fictional_rehearsal"] = "fictional_rehearsal"
 
     @field_validator("language")
     @classmethod
@@ -570,9 +619,34 @@ async def start_simulation(config: SimulationConfig) -> dict:
     schedule = opening_schedule(schedule, normalized_config['opening_policy'])
     normalized_config["reasoning_effort"] = model_reasoning_effort(normalized_config)
     roles = ["坐席"] + template["source"]["accounts"] + [f"客户{i + 1}" for i in range(config.customer_count)]
+    variation = None
+    reference = None
+    if config.creation_mode == "independent_random":
+        fixed_cards = dict(normalized_config["persona_cards"])
+        for role, identity in config.personas.items():
+            if role in roles and identity and role not in fixed_cards:
+                fixed_cards[role] = {"identity": identity}
+        try:
+            variation = create_variation_plan(
+                roles, config.language, seed=config.variation_seed,
+                fixed_persona_cards=None if config.randomize_personas else fixed_cards,
+                fixed_persona_sources=None if config.randomize_personas else config.persona_sources,
+                fixed_persona_versions=None if config.randomize_personas else config.persona_versions,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, "独立创作设置不正确：" + str(exc)) from exc
+        normalized_config.update({key: variation[key] for key in ("persona_cards", "persona_sources", "persona_versions")})
+        normalized_config["personas"] = {role: card["identity"] for role, card in variation["persona_cards"].items()}
+        normalized_config.update(variation_seed=variation["seed"], character_ids={},
+                                 story_world="independent-" + uuid.uuid4().hex)
+        if CORPUS_PATH.is_file():
+            try:
+                reference = sample_reference(load_corpus(CORPUS_PATH), variation["seed"], count=4, max_turns=4)
+            except ValueError as exc:
+                raise HTTPException(422, "对话语料库无法读取：" + str(exc)) from exc
     defaults = default_persona_cards(roles, config.language)
     for role, entry in default_entries(roles, config.language).items():
-        if role not in config.persona_cards and role not in config.personas:
+        if variation is None and role not in config.persona_cards and role not in config.personas:
             normalized_config['persona_sources'][role] = entry['id']
             normalized_config['persona_versions'][role] = entry['version']
     normalized_config["persona_cards"] = {
@@ -600,12 +674,31 @@ async def start_simulation(config: SimulationConfig) -> dict:
                               for name in ["坐席"] + template["source"]["accounts"] +
                               [f"客户{i + 1}" for i in range(config.customer_count)]},
            "errors": [], "revision": 0, "created_at": now()}
+    if variation is not None:
+        run["creative_variation"] = variation
+        run["corpus_reference"] = reference
+        run["independence"] = {"method": "independent_generation", "parent_run": None,
+                               "initial_messages": 0, "initial_story": None,
+                               "fresh_story_world": normalized_config["story_world"]}
+        validate_fresh_input(run)
     try:
         create_run(run)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     tasks[run["id"]] = asyncio.create_task(process_run(run["id"]))
     return {"id": run["id"], "status": run["status"]}
+
+
+@app.get("/api/dialogue-corpus")
+def dialogue_corpus_status() -> dict:
+    if not CORPUS_PATH.is_file():
+        return {"available": False, "conversations": 0, "sources": []}
+    try:
+        corpus = load_corpus(CORPUS_PATH)
+    except ValueError as exc:
+        raise HTTPException(422, "对话语料库无法读取：" + str(exc)) from exc
+    return {"available": True, "conversations": len(corpus["conversations"]), "sources": corpus["sources"],
+            "structure": "原始对话轮次；不推测未提供的群聊成员和时间"}
 
 
 @app.get("/api/simulations/{session_id}")
@@ -617,7 +710,7 @@ def simulation_detail(session_id: str, view: Literal["full", "workspace"] = "ful
               "validation": validate_run(source, run) if run["status"] in {"completed", "early_end"} else []}
     if view == "workspace":
         fields = {"id", "template_id", "status", "messages", "config", "revision", "cursor", "errors",
-                  "version_record", "publication", "program_review_deferred",
+                  "version_record", "publication", "program_review_deferred", "creative_variation", "independence", "corpus_reference",
                   "pause_reason", "outcome_review", "review_progress", "agent_sessions", "public_decisions",
                   "scene_progress", "validation", "vimax_events", "story_arc", "story_arc_source",
                   "memory_status", "memory_reflections"}
@@ -692,7 +785,10 @@ async def resume(session_id: str) -> dict:
 @app.post("/api/simulations/{session_id}/retry")
 async def retry(session_id: str) -> dict:
     run = get_run(session_id)
-    config = SimulationConfig(**run["config"])
+    values = dict(run["config"])
+    if values.get("creation_mode") == "independent_random":
+        values["variation_seed"] = None
+    config = SimulationConfig(**values)
     return await start_simulation(config)
 
 
@@ -716,7 +812,8 @@ def export(session_id: str, format: str) -> Response:
                            "public_decisions": decision_ledger(run), "scene_progress": scene_ledger(run),
                            "character_bindings": run.get("character_bindings", {}),
                            "memory_reflections": run.get("memory_reflections", []), "memory_status": run.get("memory_status", {}),
-                           "review_revisions": run.get("review_revisions", []), "validation": []}, ensure_ascii=False, indent=2).encode("utf-8")
+                           "review_revisions": run.get("review_revisions", []), "creative_variation": run.get("creative_variation"),
+                           "independence": run.get("independence"), "corpus_reference": run.get("corpus_reference"), "validation": []}, ensure_ascii=False, indent=2).encode("utf-8")
         media = "application/json"
     else:
         raise HTTPException(404, "不支持此导出格式")
@@ -770,6 +867,7 @@ STAGE_FOCUS = {
 
 async def review_dialogue(template: dict, run: dict) -> dict:
     result = await model_json(
+        INDEPENDENT_REVIEW_PROMPT if run['config'].get('creation_mode') == 'independent_random' else (
         "审阅一份模拟群聊的对话逻辑与群聊读感。检查说话人身份错乱、答非所问、前后矛盾、严重重复、步骤在解释前就被当作完成、"
         "客户尚未明确退出却被当作退出，以及必要因果关系被颠倒（如入口公布前已打开、点赞前已截图）。一个具体问题在坐席回答后，若后续三条以上只是不同人重复确认同一答案，"
         "也必须标出开始原地打转的消息；除非出现新的事实或新的疑问。多个角色接连附加相同的假设性提醒、没有推进实际状态，也要指出。"
@@ -824,13 +922,17 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "memory_enabled 为 true 且 issues 为空时，顺便从当前最终台词提取 memory_reflections：每项含 role、"
         "kind（preference 或 relationship）、insight、peer（关系对象，否则 null）、evidence_seq（台词编号数组）。"
         "insight 用 output_language 写一句本人实际表达过的偏好或对他人的认识，关系需有具体互动。"
-        "不得虚构、改变稳定人格或沿用本轮已提交、已打开、暂停等操作状态；没有依据时为空数组。",
+        "不得虚构、改变稳定人格或沿用本轮已提交、已打开、暂停等操作状态；没有依据时为空数组。"),
         {"goal": template["analysis"].get("primary_goal"),
          "opening_contract": opening_requirement(run) if run['config'].get('opening_policy') else None,
          "public_decisions": decision_ledger(run),
          "completion_actions": template["analysis"].get("completion_actions"),
          "persona_cards": run["config"].get("persona_cards", {}),
          "private_character_intents": run.get("person_situations", {}) if run['config'].get('dialogue_flow_version', 1) >= 3 else {},
+         "creative_variation": run.get("creative_variation"),
+         "style_review_policy": ("按本份五维风格与人物实际交流判断；分享、喜恶、吐槽、调侃和短回应本身有意义，"
+                                 "不要求引出难题、提供建议或改变决定，也不把风格统一修成解释充分的问答。"
+                                 if run['config'].get('creation_mode') == 'independent_random' else None),
          "rolling_conversation": run["config"].get("dialogue_flow_version", 1) >= 2,
          "naturalness_evidence": naturalness_evidence(run["messages"]),
          "memory_enabled": bool(run["config"].get("memory_enabled") and run.get("character_bindings")),

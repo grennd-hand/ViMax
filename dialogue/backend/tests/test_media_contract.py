@@ -21,6 +21,12 @@ def announcement():
 
 
 class MediaContractTests(unittest.TestCase):
+    def test_alias_of_known_placeholder_is_still_rejected_in_spoken_content(self):
+        messages = [announcement(), message(2, text='', kind='图片', code='SCREENSHOT_01'),
+                    message(3, text='把截图 SCREENSHOT-01 和【FHR888】发出去了。')]
+        self.assertTrue(any('消息 3' in error and '图片素材码' in error
+                            for error in screenshot_errors(source(), run(messages))))
+
     def test_decode_text_and_image_metadata_are_separate(self):
         for code in ("-", "0", "", None):
             self.assertEqual(decode_media("文本", code, " 普通内容 "),
@@ -101,6 +107,41 @@ class MediaContractTests(unittest.TestCase):
         for version in (1, 2, 3):
             self.assertEqual(screenshot_errors(source(), run([{"seq": 1, "type": "invalid"}], "completed", version)), [])
         self.assertEqual(screenshot_errors(source(), {"messages": [{"type": "invalid"}]}), [])
+
+    def test_v15_material_code_leak_is_reported_with_sequence(self):
+        messages = [announcement(), message(22, text="", kind="图片", code="SCREENSHOT_01"),
+                    message(25, text="已经添加【@Lgjaio】，把截图 SCREENSHOT_01 和【FHR888】发过去申请奖励了。")]
+        errors = screenshot_errors(source(), run(messages, "completed"))
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("消息 25", errors[0])
+        self.assertIn("图片素材码 SCREENSHOT_01", errors[0])
+        self.assertIn("不能作为角色口述内容", errors[0])
+
+    def test_material_code_leak_checks_content_for_all_media_types_and_future_events(self):
+        for kind, code in (("文本", "-"), ("图片", "SCREENSHOT_01"), ("图片+文本", "SCREENSHOT_01")):
+            with self.subTest(kind=kind):
+                messages = [announcement(), message(2, text="这张是【SCREENSHOT_01】。", kind=kind, code=code),
+                            message(3, text="", kind="图片", code="SCREENSHOT_01")]
+                errors = screenshot_errors(source(), run(messages))
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn("消息 2 的角色台词包含本稿图片素材码", errors[0])
+
+    def test_business_code_and_media_metadata_remain_valid(self):
+        messages = [announcement(), message(2, text="", kind="图片", code="SCREENSHOT_01"),
+                    message(3, text="截图和【FHR888】发过去了。"),
+                    message(4, text="截图已经发到群里了", kind="图片+文本", code="SCREENSHOT_other")]
+        messages[2]["private_note"] = "SCREENSHOT_01"
+        self.assertEqual(screenshot_errors(source(), run(messages, "completed")), [])
+        # Match the actual code token, not a prefix of another identifier.
+        messages.append(message(5, text="SCREENSHOT_010、SCREENSHOT_unused、XSCREENSHOT_01"))
+        self.assertEqual(screenshot_errors(source(), run(messages, "completed")), [])
+
+    def test_material_code_leak_does_not_change_legacy_modes(self):
+        messages = [message(1, text="SCREENSHOT_01"),
+                    message(2, text="", kind="图片", code="SCREENSHOT_01")]
+        for version in (1, 2, 3):
+            with self.subTest(version=version):
+                self.assertEqual(screenshot_errors(source(), run(messages, version=version)), [])
 
     def test_chronology_uses_sequence_instead_of_input_array_order(self):
         image = message(3, text="", kind="图片", code="SCREENSHOT_one")

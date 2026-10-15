@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
+from app.model_stream import ModelRefusalError
 
 
 _test_data = tempfile.TemporaryDirectory()
@@ -30,6 +31,13 @@ def complete(content):
     return delta(content) + delta(finish="stop") + "data: [DONE]\n\n"
 
 
+DESIGN_REFUSAL = (
+    "我不能帮助设计伪装成自然群聊的招募素材，或安排虚构群友点赞、发截图、提交申请等情节来制造真实参与和奖励成功的印象。\n\n"
+    "我可以改为规划透明的内部排练：明确这是模拟流程，不生成虚构的完成记录或收益见证；"
+    "由坐席说明参与步骤，并把奖励、付款时间和收入前景标为未经核实、不作保证。"
+)
+
+
 class Chunks(httpx.AsyncByteStream):
     def __init__(self, chunks, delay=0):
         self.chunks, self.delay, self.closed = chunks, delay, False
@@ -45,16 +53,21 @@ class Chunks(httpx.AsyncByteStream):
 
 
 class ModelStreamTests(unittest.IsolatedAsyncioTestCase):
-    async def call(self, handler, *, stream=True, budget=.4, effort="high", model="gpt-6-sol", payload=None):
+    async def call(self, handler, *, stream=True, budget=.4, effort="high", model="gpt-6-sol", payload=None, fallback="",
+                   allow_done_without_stop=False, protocol_records=None):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             token = api._run_model_client.set(client)
             effort_token = api._run_reasoning_effort.set(None)
+            policy_token = api._run_allow_done_without_stop.set(allow_done_without_stop)
+            protocol_token = api._run_stream_protocol_records.set(protocol_records)
             try:
                 with patch.object(api, "model_settings", return_value=("https://example.invalid/v1", "test-key", model)), \
                         patch.object(api, "model_reasoning_effort", return_value=effort), \
-                        patch.dict(os.environ, {"MODEL_FALLBACK_NAME": "", "MODEL_TIMEOUT_SECONDS": ".01"}):
+                        patch.dict(os.environ, {"MODEL_FALLBACK_NAME": fallback, "MODEL_TIMEOUT_SECONDS": ".01"}):
                     return await api.model_json("Review", payload or {}, stream=stream, call_budget_seconds=budget)
             finally:
+                api._run_stream_protocol_records.reset(protocol_token)
+                api._run_allow_done_without_stop.reset(policy_token)
                 api._run_reasoning_effort.reset(effort_token)
                 api._run_model_client.reset(token)
 
@@ -171,6 +184,291 @@ class ModelStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bodies[0]["reasoning_effort"], "low")
         self.assertNotIn("reasoning_effort", bodies[1])
         self.assertTrue(all(body["stream"] for body in bodies))
+
+    async def test_stream_refusal_markers_stop_once_even_after_valid_json_without_fallback(self):
+        cases = [delta('{"ok":true}') + delta(refusal="I cannot assist with that request."),
+                 delta(content=[{"type": "refusal", "refusal": "抱歉，我无法协助处理这个请求。"}]),
+                 delta(finish="content_filter"),
+                 delta(finish="content_filter", refusal="服务端明确的过滤原因"),
+                 event({"error": {"code": "bad_request", "type": "content_policy_violation", "message": "过滤说明"}}),
+                 'event: error\ndata: {"code":"content_filter","message":"过滤说明"}\n\n']
+        for text in cases:
+            with self.subTest(text=text):
+                bodies, streams = [], []
+                def handler(request):
+                    bodies.append(json.loads(request.content))
+                    stream = Chunks([(text + delta(finish="stop") + "data: [DONE]\n\n").encode()])
+                    streams.append(stream)
+                    return httpx.Response(200, stream=stream)
+                with self.assertRaisesRegex(ModelRefusalError, "拒绝") as caught:
+                    await self.call(handler, fallback="other-model")
+                self.assertNotIn("连接", str(caught.exception))
+                self.assertEqual(len(bodies), 1)
+                self.assertEqual(bodies[0]["model"], "gpt-6-sol")
+                self.assertEqual(bodies[0]["reasoning_effort"], "high")
+                self.assertTrue(streams[0].closed)
+                if "content_filter" in text or "content_policy_violation" in text:
+                    self.assertEqual(caught.exception.kind, "content_filter")
+
+    async def test_nonstream_refusal_and_content_filter_are_terminal(self):
+        choices = [{"message": {"refusal": "I cannot help with this request.", "content": None}},
+                   {"finish_reason": "content_filter", "message": {"content": '{"ok":true}', "refusal": "过滤原因"}},
+                   {"message": {"content": [{"type": "refusal", "refusal": "服务端拒绝"}]}}]
+        for choice in choices:
+            with self.subTest(choice=choice):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, json={"choices": [choice]})
+                with self.assertRaisesRegex(ModelRefusalError, "拒绝"):
+                    await self.call(handler, stream=False, fallback="other-model")
+                self.assertEqual(len(requests), 1)
+
+    async def test_plain_text_explicit_refusal_is_terminal_in_both_modes(self):
+        for stream in (True, False):
+            for refusal in ("I'm sorry, but I can't assist with that request.", "抱歉，我无法帮助完成这个请求。",
+                            "无法协助编写这类推广话术。可以改写为说明用途的内容。",
+                            "不能帮助完成这个请求。", "无法编写这些话术。", "不能生成这类内容。", "无法提供该内容。"):
+                with self.subTest(stream=stream, refusal=refusal):
+                    requests = []
+                    def handler(request):
+                        requests.append(request)
+                        return (httpx.Response(200, stream=Chunks([complete(refusal).encode()])) if stream else
+                                httpx.Response(200, json={"choices": [{"message": {"content": refusal}}]}))
+                    with self.assertRaisesRegex(ModelRefusalError, "拒绝"):
+                        await self.call(handler, stream=stream, fallback="other-model")
+                    self.assertEqual(len(requests), 1)
+
+    async def test_valid_json_containing_dialogue_refusal_is_not_a_model_refusal(self):
+        value = {"turns": [{"content": "抱歉，我不能帮助完成这个请求。"},
+                           {"content": "无法协助编写这类推广话术。可以改写为其他内容。"},
+                           {"content": DESIGN_REFUSAL}, {"content": "我不能保证到账。"}],
+                 "goal_reason": "I cannot guarantee payment."}
+        content = json.dumps(value, ensure_ascii=False)
+        for stream, compatible in ((False, False), (True, False), (True, True)):
+            with self.subTest(stream=stream, compatible=compatible):
+                text = delta(content) + 'data: [DONE]\n\n' if compatible else complete(content)
+                def handler(request):
+                    return (httpx.Response(200, stream=Chunks([text.encode()])) if stream else
+                            httpx.Response(200, json={"choices": [{"message": {"content": content}}]}))
+                self.assertEqual(await self.call(handler, stream=stream, allow_done_without_stop=compatible), value)
+
+    async def test_actual_v07_design_refusal_is_terminal_without_a_request_keyword_or_fallback(self):
+        for stream, compatible in ((False, False), (True, False), (True, True)):
+            with self.subTest(stream=stream, compatible=compatible):
+                requests = []
+                text = delta(DESIGN_REFUSAL) + 'data: [DONE]\n\n' if compatible else complete(DESIGN_REFUSAL)
+                def handler(request):
+                    requests.append(json.loads(request.content))
+                    return (httpx.Response(200, stream=Chunks([text.encode()])) if stream else
+                            httpx.Response(200, json={"choices": [{"message": {"content": DESIGN_REFUSAL}}]}))
+                with self.assertRaises(ModelRefusalError) as caught:
+                    await self.call(handler, stream=stream, allow_done_without_stop=compatible, fallback='other-model')
+                self.assertEqual(caught.exception.kind, 'refusal')
+                self.assertIn('我不能帮助设计', str(caught.exception))
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(requests[0]['model'], 'gpt-6-sol')
+                self.assertEqual(requests[0]['reasoning_effort'], 'high')
+
+    async def test_bare_nonrefusal_statement_keeps_json_failure_retries(self):
+        for content in ('不能保证到账。', '我不能保证到账。'):
+            with self.subTest(content=content):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+                with self.assertRaisesRegex(RuntimeError, "JSON 无效") as caught:
+                    await self.call(handler, stream=False)
+                self.assertNotIsInstance(caught.exception, ModelRefusalError)
+                self.assertEqual(len(requests), 2)
+
+    async def test_http_policy_refusal_does_not_downgrade_or_try_fallback(self):
+        requests = []
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(400, json={"error": {"code": "content_filter", "message": "请求被安全过滤"}})
+        with self.assertRaisesRegex(ModelRefusalError, "内容过滤"):
+            await self.call(handler, stream=False, fallback="other-model")
+        self.assertEqual(len(requests), 1)
+
+    async def test_policy_refusal_after_existing_implicit_effort_retry_is_still_terminal(self):
+        bodies = []
+        def handler(request):
+            bodies.append(json.loads(request.content))
+            error = ({"message": "reasoning_effort is unsupported"} if len(bodies) == 1 else
+                     {"code": "content_filter", "message": "请求被过滤"})
+            return httpx.Response(400, json={"error": error})
+        with patch.object(api, "_reasoning_unsupported", set()), patch.dict(os.environ, {"MODEL_SCENE_REASONING_EFFORT": "low"}):
+            with self.assertRaisesRegex(ModelRefusalError, "内容过滤"):
+                await self.call(handler, stream=False, effort=None, model="gpt-6", payload={"scene_draft": True}, fallback="other-model")
+        self.assertEqual(len(bodies), 2)
+        self.assertTrue(all(body["model"] == "gpt-6" for body in bodies))
+
+    async def test_nonrefusal_errors_keep_both_attempts_and_existing_fallback_order(self):
+        models = []
+        def handler(request):
+            models.append(json.loads(request.content)["model"])
+            raise httpx.ReadError("offline transport failed", request=request)
+        with self.assertRaisesRegex(RuntimeError, "传输失败"):
+            await self.call(handler, fallback="other-model")
+        self.assertEqual(models, ["gpt-6-sol", "other-model", "gpt-6-sol", "other-model"])
+
+    async def test_refusal_details_redact_key_private_endpoint_and_authorization(self):
+        reason = "拒绝原因 test-key https://example.invalid/v1 example.invalid Bearer test-key api_key=test-key"
+        for stream in (True, False):
+            with self.subTest(stream=stream):
+                def handler(request):
+                    return (httpx.Response(200, stream=Chunks([delta(refusal=reason).encode()])) if stream else
+                            httpx.Response(200, json={"choices": [{"message": {"content": None, "refusal": reason}}]}))
+                with self.assertRaises(ModelRefusalError) as caught:
+                    await self.call(handler, stream=stream)
+                rendered = str(caught.exception)
+                self.assertIn("拒绝原因", rendered)
+                self.assertNotIn("test-key", rendered)
+                self.assertNotIn("example.invalid", rendered)
+                self.assertIsNone(caught.exception.__cause__)
+
+    async def test_transport_json_and_response_shape_failures_keep_existing_retries_and_distinct_labels(self):
+        for kind, expected in (("transport", "传输失败"), ("json", "JSON 无效"), ("shape", "响应结构")):
+            with self.subTest(kind=kind):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    if kind == "transport":
+                        raise httpx.ReadError("private details must not be shown", request=request)
+                    if kind == "json":
+                        return httpx.Response(200, json={"choices": [{"message": {"content": "not valid json"}}]})
+                    return httpx.Response(200, json={"choices": []})
+                with self.assertRaisesRegex(RuntimeError, expected) as caught:
+                    await self.call(handler, stream=False)
+                self.assertEqual(len(requests), 2)
+                self.assertNotIn("private details", str(caught.exception))
+
+    async def test_format_diagnostics_preserve_internal_reason_and_json_position_without_extra_requests(self):
+        cases = [
+            (False, {}, ("响应结构", "KeyError", "choices")),
+            (False, {"choices": []}, ("响应结构", "IndexError", "list index out of range")),
+            (True, event({"usage": {}}), ("流式格式", "ValueError", "缺少choices")),
+            (True, delta('{"ok":true}') + "data: [DONE]\n\n", ("流式格式", "未正常结束即返回DONE")),
+            (True, delta('{"ok":true}') + delta(finish="stop"), ("流式格式", "未收到完整stop与DONE")),
+            (True, delta('{"ok":true}') + delta(finish="length"), ("流式格式", "未完整结束：length")),
+            (True, "data: {invalid}\n\n", ("JSON 无效", "JSONDecodeError", "line 1 column 2 (char 1)")),
+            (True, complete('{"ok":'), ("JSON 无效", "JSONDecodeError", "line 1 column 7 (char 6)")),
+        ]
+        for stream, value, expected in cases:
+            with self.subTest(stream=stream, expected=expected):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return (httpx.Response(200, stream=Chunks([value.encode()])) if stream else
+                            httpx.Response(200, json=value))
+                with self.assertRaises(RuntimeError) as caught:
+                    await self.call(handler, stream=stream)
+                for part in expected:
+                    self.assertIn(part, str(caught.exception))
+                self.assertEqual(len(requests), 2)
+
+    async def test_format_diagnostics_redact_bound_and_remove_controls_from_upstream_reason(self):
+        reason = ("unexpected finish test-key https://example.invalid/v1 example.invalid "
+                  "Bearer test-key api_key=test-key\n\x00" + "x" * 600)
+        requests = []
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, stream=Chunks([delta(finish=reason).encode()]))
+        with self.assertRaises(RuntimeError) as caught:
+            await self.call(handler)
+        rendered = str(caught.exception)
+        self.assertIn("ValueError: 模型流未完整结束", rendered)
+        self.assertIn("unexpected finish", rendered)
+        self.assertNotIn("test-key", rendered)
+        self.assertNotIn("example.invalid", rendered)
+        self.assertNotIn("\n", rendered)
+        self.assertNotIn("\x00", rendered)
+        self.assertLess(len(rendered), 500)
+        self.assertEqual(len(requests), 2)
+
+    async def test_recorded_gateway_frame_shape_requires_explicit_compatibility_and_reports_missing_stop(self):
+        # Same frame shape/content split as minimal-raw-sse-02, with fixture IDs.
+        fragments = [{"role": "assistant"}, {"reasoning_content": "fixture reasoning"}]
+        fragments += [{"content": part} for part in ['{"', 'ok', '":', 'true', '}']]
+        text = ''.join(event({"id": "offline-fixture", "created": 0, "model": "gpt-6-sol",
+                              "object": "chat.completion.chunk", "choices": [
+                                  {"index": 0, "delta": value, "finish_reason": None}]}) for value in fragments)
+        text += "data: [DONE]\n\n"
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                requests, protocols = [], []
+                def handler(request):
+                    requests.append(json.loads(request.content))
+                    return httpx.Response(200, stream=Chunks([text.encode()]))
+                if enabled:
+                    self.assertEqual(await self.call(handler, allow_done_without_stop=True,
+                                                     protocol_records=protocols), {"ok": True})
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(protocols, [{"model": "gpt-6-sol", "stop_received": False,
+                        "done_received": True, "allow_done_without_stop": True, "compatibility_used": True,
+                        "strict_json_validated": True, "json_type": "object", "json_fence": False}])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "未正常结束即返回DONE"):
+                        await self.call(handler, protocol_records=protocols)
+                    self.assertEqual(len(requests), 2)
+                    self.assertEqual(protocols, [])
+                self.assertTrue(all(body['model'] == 'gpt-6-sol' and body['reasoning_effort'] == 'high'
+                                    and body['stream'] for body in requests))
+        self.assertFalse(api._run_allow_done_without_stop.get())
+
+    async def test_missing_stop_compatibility_accepts_only_whole_json_object_or_array_and_single_fence(self):
+        for content, payload, expected in [('{"ok":true}', {}, {"ok": True}),
+                                           ('```json\n{"ok":true}\n```', {}, {"ok": True}),
+                                           ('```\n{"ok":true}\n```', {}, {"ok": True}),
+                                           ('[]', {"scene_draft": True}, {"turns": []}),
+                                           ('```json\n[{}]\n```', {"story_plan": True}, {"beats": [{}]})]:
+            with self.subTest(content=content):
+                text = delta(content) + "data: [DONE]"  # Final blank line is optional.
+                self.assertEqual(await self.call(lambda request: httpx.Response(200, stream=Chunks([text.encode()])),
+                                                 allow_done_without_stop=True, payload=payload), expected)
+        invalid = ['', ' ', '{"ok":', '[{}', 'prefix {"ok":true}', '{"ok":true} suffix', '{}{}',
+                   'null', 'true', '42', '"text"', '{"ok":NaN}', '{"ok":Infinity}',
+                   '```json\n{}\n``` explanation', 'explanation ```json\n{}\n```',
+                   '```json\n{}\n```\n```json\n{}\n```', '```json\n```json\n{}\n```\n```']
+        for content in invalid:
+            with self.subTest(content=content):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, stream=Chunks([(delta(content) + "data: [DONE]\n\n").encode()]))
+                with self.assertRaises(RuntimeError):
+                    await self.call(handler, allow_done_without_stop=True)
+                self.assertEqual(len(requests), 2)
+
+    async def test_compatibility_still_rejects_explicit_bad_finish_refusal_error_and_no_done(self):
+        cases = [(delta('{"ok":true}'), False),
+                 (delta('{"ok":true}') + delta(finish='stop'), False),
+                 (delta('{"ok":true}') + delta(finish='length') + 'data: [DONE]\n\n', False),
+                 (delta('{"ok":true}') + event({'error': {'message': 'failed'}}) + 'data: [DONE]\n\n', False),
+                 (delta('{"ok":true}') + delta(finish='content_filter') + 'data: [DONE]\n\n', True),
+                 (delta(refusal='I cannot help with this request.') + 'data: [DONE]\n\n', True),
+                 (delta('I cannot help with this request.') + 'data: [DONE]\n\n', True),
+                 (delta('{"refusal":"I cannot help with this request."}') + 'data: [DONE]\n\n', True)]
+        for text, refusal in cases:
+            with self.subTest(text=text):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, stream=Chunks([text.encode()]))
+                with self.assertRaises(ModelRefusalError if refusal else RuntimeError):
+                    await self.call(handler, allow_done_without_stop=True)
+                self.assertEqual(len(requests), 1 if refusal else 2)
+
+    async def test_normal_stop_records_actual_protocol_even_when_compatibility_is_available(self):
+        protocols = []
+        result = await self.call(lambda request: httpx.Response(200, stream=Chunks([complete('{"ok":true}').encode()])),
+                                 allow_done_without_stop=True, protocol_records=protocols)
+        self.assertEqual(result, {"ok": True})
+        self.assertTrue(protocols[0]['stop_received'])
+        self.assertTrue(protocols[0]['done_received'])
+        self.assertFalse(protocols[0]['compatibility_used'])
+        self.assertFalse(protocols[0]['strict_json_validated'])
 
 
 if __name__ == "__main__":

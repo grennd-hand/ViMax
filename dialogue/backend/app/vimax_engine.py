@@ -27,6 +27,9 @@ from .opening import opening_requirement, opening_stage
 from .conversation_flow import STAGES, rolling_context, naturalness_evidence, flow_errors
 from .media_contract import decode_media, screenshot_errors
 from .version_archive import archive_candidate
+from .creative_variation import build_variation_prompt
+from .dialogue_corpus import build_reference_prompt
+from .independent_writing import WRITER_PROMPT as INDEPENDENT_WRITE_PROMPT, creation_brief
 
 ROOT = Path(__file__).resolve().parents[3]
 PLAN_PROMPT = """你是多人群聊编剧。母本提供业务事实，群友有自己的关注和需求。先规划人为什么开口，再准备可能被触发的话题；不写逐句台词，不替每个人安排一段生活展示或任务表演。业务动作按已公开信息发生，话题不按人头或完成位置排队。普通经历可以创作，不得变成新业务条件、已核实结果或共同过去。"""
@@ -54,6 +57,10 @@ def screenwriter_class():
     return module.Screenwriter
 
 
+class ModelRefusalError(RuntimeError):
+    """A returned refusal is evidence, not a request to repair line formatting."""
+
+
 def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: int | None = None) -> list[dict]:
     messages = []
     roles = set(run["agent_sessions"])
@@ -72,6 +79,9 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
                     number, speaker, reply, delay, stage, kind, image_code, text = parts
                 else:
                     number, speaker, reply, delay, stage, text = parts
+                delay, stage = delay.strip(), stage.strip()
+                stage = {'寒暄': '寒暄暖场', '暖场': '寒暄暖场', '了解用途': '了解群用途',
+                         '用途说明': '了解群用途', '进入正题': '自然群聊', '闲聊': '自然群聊'}.get(stage, stage)
                 if not delay.isdigit() or not 0 <= int(delay) <= 600 or stage not in STAGES:
                     raise ValueError('消息间隔需为0至600秒，交流阶段需为寒暄暖场、了解群用途或自然群聊')
             else:
@@ -85,6 +95,10 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
                 raise ValueError(f"消息{seq}使用了未设置的人物：{speaker}")
             if reply_to is not None and not 0 < reply_to < seq:
                 raise ValueError(f"消息{seq}回复了尚未出现的消息")
+            if (media and run['config'].get('creation_mode') == 'independent_random'
+                    and kind.strip() in {'图片', '图片+文本'}
+                    and re.fullmatch(r'SCREENSHOT-[A-Za-z0-9_-]+', image_code.strip())):
+                image_code = 'SCREENSHOT_' + image_code.strip()[len('SCREENSHOT-'):]
             payload = decode_media(kind, image_code, text) if media else {'type': '文本', 'content': text.strip(), 'image_code': None, 'image_mode': None}
             if (not payload['content'] and payload['type'] != '图片') or len(payload['content']) > message_char_limit(run["config"].get("language"), seat=speaker == "坐席"):
                 raise ValueError(f"消息{seq}为空或超出单条长度")
@@ -95,6 +109,8 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
                              "source_rows": [], "reply_source_seq": None, "stage": stage,
                              "reaction": "refuse" if declined else "continue", "task_state": "declined" if declined else "active", "performed_steps": []})
     count = expected_count if expected_count is not None else run['config']['target_messages']
+    if not messages and re.search(r'无法协助|无法编写|不能协助|不能帮助|我不能|cannot (?:help|assist)', '\n'.join(scenes), re.I):
+        raise ModelRefusalError('模型返回了拒绝说明，未生成剧本；原始响应已保留，不按格式错误重试')
     if len(messages) != count:
         raise ValueError(f'需要{count}条消息，实际生成{len(messages)}条')
     if start == 1 and messages[0]['sender'] != '坐席':
@@ -113,9 +129,16 @@ def writing_contract(template: dict, run: dict) -> str:
                "cast": list(run['agent_sessions']),
                "roles": run["config"]["persona_cards"] if run['config'].get('persona_strength', 0.85) > 0 else {},
                "persona_strength": run['config'].get('persona_strength', 0.85),
+               "usage_context": run['config'].get('usage_context'),
                "language": language_context(run["config"].get("language")),
                "past_experience_by_owner": {role:state.get("long_term_memory",[]) for role,state in run["agent_sessions"].items()},
                "additional_plot": run["config"].get("story_notes", "")}
+    variation_instruction = (build_variation_prompt(run['creative_variation'], style_examples=(run.get('corpus_reference') or {}).get('samples'))
+                             if run.get('creative_variation') else '')
+    variation_instruction += build_reference_prompt(run.get('corpus_reference'))
+    if run['config'].get('creation_mode') == 'independent_random':
+        return (creation_brief(target) + '\n' + opening_requirement(run) + '\n'
+                + json.dumps(context, ensure_ascii=False) + '\n' + variation_instruction)
     return (
         "这是基于Excel母本重新创作的群聊，不是影视对白。最高优先级是坐席内容的实际目的和source_seat_evidence。"
         "母本账号身份、数量、台词顺序均不需要沿用；只使用cast中的人物。"
@@ -151,7 +174,8 @@ def writing_contract(template: dict, run: dict) -> str:
          "文字消息不含图片素材，禁止用[已完成截图]之类假图片占位符；可以用文字说明已分享截图。") +
         "不要让人物说‘不虚构结果’‘公开说明的动作’‘活动文本提到’等创作/审阅用语，直接像真人接话。"
         "参与者的私有判断只属于本人，其他人只能依据已公开的话回应。不要输出角色内心、制作解释或旁白。"
-        "\n" + opening_requirement(run) + "\n" + json.dumps(context, ensure_ascii=False)
+        "\n" + opening_requirement(run) + "\n" + json.dumps(context, ensure_ascii=False) +
+        ("\n" + variation_instruction if variation_instruction else "")
     )
 
 
@@ -161,7 +185,17 @@ class RecordedChat:
 
     async def ainvoke(self, messages):
         began = time.monotonic()
-        response = await self.chat.ainvoke(messages)
+        try:
+            response = await self.chat.ainvoke(messages)
+        except Exception as exc:
+            run = self.api.get_run(self.session_id)
+            run.setdefault('vimax_failed_calls', []).append({
+                'stage': self.stage, 'seconds': round(time.monotonic()-began, 2),
+                'model': self.chat.model_name, 'reasoning_effort': self.chat.reasoning_effort,
+                'error_type': type(exc).__name__, 'response_received': False,
+            })
+            self.api.save_run(run)
+            raise
         run = self.api.get_run(self.session_id)
         if run["status"] != "running":
             raise asyncio.CancelledError()
@@ -178,11 +212,12 @@ class RecordedChat:
 def output_format(run):
     if run['config'].get('dialogue_flow_version', 1) >= 4:
         return ('八项格式NNN|人物|回复编号或0|间隔秒|交流阶段|消息类型|图片码或-|内容。'
+                '间隔秒填写0至600的整数，单位为秒。'
                 '文本的图片码填-；图片或图片+文本必须有SCREENSHOT_开头的唯一素材码。'
                 '图片行内容可空，图片+文本的内容是本人实际附言，不写舞台说明。'
                 '例如001|坐席|0|4|寒暄暖场|文本|-|大家好。')
     if run['config'].get('dialogue_flow_version', 1) >= 2:
-        return '六项格式NNN|人物|回复编号或0|间隔秒|交流阶段|文字，例如001|坐席|0|4|寒暄暖场|大家好。'
+        return '六项格式NNN|人物|回复编号或0|间隔秒|交流阶段|文字，间隔秒填写0至600的整数，例如001|坐席|0|4|寒暄暖场|大家好。'
     return '四项格式NNN|人物|回复编号或0|文字。'
 
 
@@ -212,7 +247,9 @@ async def process(session_id, api):
             base,key,model_name = api.model_settings()
             chat = ChatOpenAI(model=run["config"].get("dialogue_model") or model_name,
                               api_key=key, base_url=base,
-                              streaming=True, max_retries=0, max_tokens=16000, timeout=model_timeout,
+                              streaming=True, max_retries=0,
+                              max_tokens=32000 if run['config'].get('creation_mode') == 'independent_random' else 16000,
+                              timeout=model_timeout,
                               reasoning_effort=api.model_reasoning_effort(run["config"]) or ("low" if re.fullmatch(r"gpt-(?:5|6)(?:\.\d+)?",run["config"].get("dialogue_model") or model_name) else None), http_async_client=http_client)
             writer_type = screenwriter_class()
             contract = writing_contract(template, run)
@@ -220,18 +257,50 @@ async def process(session_id, api):
                 run["review_progress"] = {"phase": "planning", "repair_rounds": 0}
                 api.save_run(run)
                 writer = writer_type(chat_model=RecordedChat(chat, api, session_id, "plan"))
-                story = await writer.develop_story("根据坐席母本目的，设计群聊事件线。", contract +
-                    "只输出精简事件大纲，不写完整剧本；每个事件提供不同的交流内容、变化与目标贡献；不要按人头轮流报告。" + planning_requirement(run),system_prompt=PLAN_PROMPT)
+                independent = run['config'].get('creation_mode') == 'independent_random'
+                idea = "设计本份陌生群友会愿意聊的内容和人物处境，母本事实与目标按输入保留。" if independent else "根据坐席母本目的，设计群聊事件线。"
+                detail = ("只输出本份可触发的交流素材和人物意图，不写逐句台词；分享、见闻、情绪和玩笑也能带来交流。"
+                          if independent else "只输出精简事件大纲，不写完整剧本；每个事件提供不同的交流内容、变化与目标贡献；不要按人头轮流报告。")
+                story = await writer.develop_story(idea, contract + detail + planning_requirement(run),system_prompt=PLAN_PROMPT)
                 run = api.get_run(session_id)
                 run["vimax_events"] = parse_plan(story, run)
                 run["vimax_story"] = json.dumps({"events": run["vimax_events"]}, ensure_ascii=False)
                 api.save_run(run)
-            if run['config'].get('dialogue_flow_version', 1) >= 2:
+            if run['config'].get('creation_mode') == 'independent_random' and run['config']['target_messages'] <= 50:
+                if not run.get('vimax_draft'):
+                    run['review_progress'].update(phase='writing', drafted=0, target=run['config']['target_messages'])
+                    api.save_run(run)
+                    writer = writer_type(chat_model=RecordedChat(chat, api, session_id, 'independent_full_draft'))
+                    request = contract + '\n这是本份第一次完整创作。仅依据本份新规划、人格和公开语料参考，从001独立写到目标条数。'
+                    request += '\n本份刚规划的人物私有处境和可触发话题：' + json.dumps(rolling_context(run, []), ensure_ascii=False)
+                    request += '\n以上私有内容只属于各自人物，不等于其他群友已知；写作中只依据此前实际公开的消息接话。'
+                    request += '\n不读取、不续接、不改写其他版本的台词或情节；本份规划中的素材也不用全部排队演完。'
+                    request += '\n返回script数组，每个元素是连续编号台词字符串；所有元素合计必须恰好' + str(run['config']['target_messages']) + '条。'
+                    request += '\n' + output_format(run)
+                    for format_attempt in range(2):
+                        scenes = await writer.write_script_based_on_story(run['vimax_story'], request, system_prompt=INDEPENDENT_WRITE_PROMPT)
+                        run = api.get_run(session_id)
+                        try:
+                            draft = decode_scenes(scenes, run)
+                            break
+                        except ValueError as exc:
+                            if format_attempt:
+                                raise
+                            request += '\n本份初稿格式检查失败：' + str(exc)
+                            request += '\n只修正本份格式、连续编号和条数，保留人物与已有情节；完整返回全部目标台词。原始返回：' + json.dumps(scenes, ensure_ascii=False)
+                    checkpoint_candidate(api, run, draft, '独立随机完整初稿，尚未结构与质量检查')
+                    run['vimax_draft'] = draft
+                    run['vimax_segments'] = [{'start': 1, 'end': len(draft), 'strategy': 'whole_fresh_draft'}]
+                    run['schedule'] = [{**slot, 'stage': draft[i]['stage']} for i, slot in enumerate(run['schedule'])]
+                    run['review_progress']['phase'] = 'validate'
+                    api.save_run(run)
+            elif run['config'].get('dialogue_flow_version', 1) >= 2:
                 target = run['config']['target_messages']
                 history = list(run.get('vimax_draft', []))
                 while len(history) < target:
                     start = len(history) + 1
-                    count = min(30, target - len(history))
+                    independent = run['config'].get('creation_mode') == 'independent_random'
+                    count = min(50 if independent else 30, target - len(history))
                     run['review_progress'].update(phase='writing', drafted=len(history), target=target)
                     api.save_run(run)
                     request = contract + '\n仅续写本段，不重写已生成台词。读取public_history保持事实连续；private_by_owner里的个人处境未公开前仅本人知道。'
@@ -241,10 +310,11 @@ async def process(session_id, api):
                     request += ('总条数不代表每个人都要发言。根据话题与本人关注选择发言者，不轮流点名，不让没人回应的话硬被接住。'
                                 '间隔按输入长度、停顿与忙自己的事自然变化，阶段为寒暄暖场、了解群用途、自然群聊。'
                                 '引用回复只在确有指向需要时使用，普通接话用0。'
-                                '只剩本段时保证愿意者已完成母本目标；可有普通接话结尾，不必坐席总结。')
+                                + ('最后一段检查至少一位虚构人物已完成故事内目标，结尾仍可普通接话。' if independent else
+                                   '只剩本段时保证愿意者已完成母本目标；可有普通接话结尾，不必坐席总结。'))
                     for attempt in range(2):
                         writer = writer_type(chat_model=RecordedChat(chat, api, session_id, f'write_{start}'))
-                        scenes = await writer.write_script_based_on_story(run['vimax_story'], request, system_prompt=WRITE_PROMPT)
+                        scenes = await writer.write_script_based_on_story(run['vimax_story'], request, system_prompt=INDEPENDENT_WRITE_PROMPT if independent else WRITE_PROMPT)
                         try:
                             segment = decode_scenes(scenes, run, start, count)
                             combined = history + segment
@@ -266,7 +336,8 @@ async def process(session_id, api):
                     latest['vimax_draft'] = history
                     latest['schedule'] = [{**slot, 'stage': history[i]['stage'] if i < len(history) else '自然群聊'}
                                           for i, slot in enumerate(latest['schedule'])]
-                    latest.setdefault('vimax_segments', []).append({'start': start, 'end': len(history)})
+                    latest.setdefault('vimax_segments', []).append({'start': start, 'end': len(history),
+                                                                   **({'strategy': 'independent_fresh_segments'} if independent else {})})
                     latest['review_progress'].update(phase='writing', drafted=len(history), target=target)
                     api.save_run(latest)
                     run = latest
@@ -382,7 +453,11 @@ async def process(session_id, api):
         run = api.get_run(session_id)
         if run["status"] == "running":
             run["status"] = "failed"
-            run["errors"] = [str(exc)[:1000]]
+            detail = str(exc).strip()
+            if not detail:
+                detail = ('模型服务读取响应超时' if isinstance(exc, (httpx.TimeoutException, TimeoutError))
+                          else f'模型调用失败（{type(exc).__name__}）')
+            run["errors"] = [detail[:1000]]
             api.save_run(run)
 
 
@@ -449,7 +524,8 @@ async def revise(writer_type, chat, api, session_id, template, run, issues, reas
     request += "\n原对话："+json.dumps([{k:m.get(k) for k in ['seq','sender','reply_to','delay','stage','type','image_code','image_mode','content']} for m in messages],ensure_ascii=False)
     request += '\n' + output_format(run)
     request += "\n在script数组内返回完整修订稿。允许调整问题段的发言人和接话关系；其他有效内容尽量保留。可以补入母本原值，但不能添加未知原值或改变业务含义。连续重复的问题要重写整段，不能只换近义词。修改旧话后须检查后续代词、个人决定、时间安排是否仍有前因；不要只修被点名的一句却留下后续悬空回应。"
-    scenes = await writer.write_script_based_on_story(run.get('vimax_story',''),request,system_prompt=WRITE_PROMPT)
+    prompt = INDEPENDENT_WRITE_PROMPT if run['config'].get('creation_mode') == 'independent_random' else WRITE_PROMPT
+    scenes = await writer.write_script_based_on_story(run.get('vimax_story',''),request,system_prompt=prompt)
     latest=api.get_run(session_id)
     run['vimax_calls']=latest.get('vimax_calls',[])
     run['vimax_raw']=latest.get('vimax_raw',{})

@@ -6,6 +6,7 @@ from typing import Any
 
 
 SCREENSHOT_CODE_RE = re.compile(r"SCREENSHOT_[A-Za-z0-9_-]+\Z")
+_CONTENT_SCREENSHOT_CODE_RE = re.compile(r"(?<![A-Za-z0-9_-])SCREENSHOT[_-][A-Za-z0-9_-]+")
 IMAGE_MODE = "素材占位"
 _SCREENSHOT_RE = re.compile(r"截图|截屏")
 _CLAUSE_RE = re.compile(r"[^，,。！!；;\n]+")
@@ -80,9 +81,19 @@ def screenshot_errors(source: dict[str, Any], run: dict[str, Any]) -> list[str]:
     image_owners: set[str] = set()
     participant_image = False
     errors: list[str] = []
+    image_codes = {str(item.get("image_code") or "").strip()
+                   for item in run.get("messages", [])
+                   if item.get("type") in {"图片", "图片+文本"}
+                   and SCREENSHOT_CODE_RE.fullmatch(str(item.get("image_code") or "").strip())}
     for item in sorted(run.get("messages", []), key=lambda message: message["seq"]):
         seq, sender = item["seq"], item.get("sender", "")
         text = str(item.get("content") or "")
+        spoken_codes = {re.sub(r'^SCREENSHOT-', 'SCREENSHOT_', code)
+                        for code in _CONTENT_SCREENSHOT_CODE_RE.findall(text)}
+        leaked_codes = sorted(spoken_codes & image_codes)
+        if leaked_codes:
+            errors.append(f"消息 {seq} 的角色台词包含本稿图片素材码 {'、'.join(leaked_codes)}，"
+                          "素材码只能放在图片元数据中，不能作为角色口述内容")
         valid_image = False
         try:
             media = decode_media(item.get("type"), item.get("image_code"), text)

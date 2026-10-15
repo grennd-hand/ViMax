@@ -13,6 +13,54 @@ import uuid
 MESSAGE_FIELDS = ('seq', 'sender', 'content', 'reply_to', 'delay', 'stage', 'type',
                   'image_code', 'image_mode', 'replace_date')
 SNAPSHOT_FILES = ('run.json', 'messages.md', 'messages.xlsx', 'manifest.json')
+INDEPENDENT_SERIES = '独立随机-20261015'
+
+
+def is_independent(run):
+    record = run.get('version_record') or {}
+    return (record.get('method') == 'independent_generation'
+            or record.get('series') == INDEPENDENT_SERIES
+            or (run.get('independence') or {}).get('method') == 'independent_generation')
+
+
+def independent_review_state(run, fingerprint=None):
+    """Only the last actual returned call can certify this exact full draft."""
+    if run.get('program_review_deferred') is True:
+        return 'deferred'
+    messages = run.get('messages') or []
+    if fingerprint is None:
+        fingerprint = hashlib.sha256(canonical([{key: message.get(key) for key in MESSAGE_FIELDS}
+                                                for message in messages]).encode()).hexdigest()
+    history = run.get('program_review_history') or []
+    last = history[-1] if history else {}
+    if (isinstance(last, dict) and last.get('state') == 'returned'
+            and last.get('messages_sha256') == fingerprint
+            and last.get('message_count') == len(messages) == 150
+            and isinstance(last.get('review'), dict)):
+        return 'reviewed'
+    return 'not_completed'
+
+
+def independent_evidence(run, version):
+    """Check preserved fresh-run evidence, not a claim of semantic uniqueness."""
+    family, revision = version_parts(version)
+    assert 1 <= family <= 40, 'Independent series expects family V01..V40'
+    record, plan = run.get('version_record', {}), run.get('creative_variation') or {}
+    proof, reference = run.get('independence') or {}, run.get('corpus_reference') or {}
+    assert record.get('method') == 'independent_generation' and record.get('series') == INDEPENDENT_SERIES
+    for item in (record, plan, proof):
+        assert item.get('parent_run', 'missing') is None, 'Independent draft cannot inherit a parent run'
+        assert item.get('parent_version') in (None, ''), 'Independent draft cannot inherit a parent version'
+    assert plan.get('method') == proof.get('method') == 'independent_generation'
+    assert proof.get('initial_messages') == 0 and proof.get('initial_story', 'missing') is None
+    assert proof.get('fresh_story_world') == run['config'].get('story_world') and proof.get('fresh_story_world')
+    assert isinstance(plan.get('style_label'), str) and plan['style_label'].strip(), 'Independent style label required'
+    assert plan.get('persona_cards') == run['config'].get('persona_cards') and plan.get('persona_cards'), 'Independent cast differs from saved plan'
+    assert isinstance(reference.get('samples'), list) and reference['samples'], 'Actual public corpus samples required'
+    assert isinstance(reference.get('sources'), list) and reference['sources'], 'Public corpus source provenance required'
+    assert all(source.get('url') and source.get('license') for source in reference['sources'])
+    return {'series': INDEPENDENT_SERIES, 'method': 'independent_generation', 'parent_run': None,
+            'display_label': f'独立{family:02d}' + ('-' + revision if revision else ''), 'style_label': plan['style_label']}
 
 
 def version_parts(label):
@@ -98,8 +146,12 @@ def publication_metadata(run, source_directory, version, selected, source_sha256
         assert not run.get('errors') and not checks, 'Deferred candidate failed actual full-draft contracts'
     if selected:
         assert review['verdict'] == 'candidate' and not deferred and history, 'Selected evolution needs human acceptance and an actual full model review'
+        if is_independent(run):
+            assert independent_review_state(run, fingerprint) == 'reviewed', 'Selected independent review is not returned and bound to this full draft'
         last_review = history[-1].get('review', {})
         assert last_review.get('goal_met') is True and not last_review.get('issues'), 'Selected model review did not pass'
+        if is_independent(run):
+            assert last_review.get('issues') == [], 'Selected independent review must return an explicit empty issues list'
     metadata = {'read_only': True, 'version': version, 'selected': selected,
             'source_run_sha256': source_sha256, 'message_sha256': fingerprint,
             'human_verdict': review['verdict'], 'human_summary': review['summary'],
@@ -107,6 +159,13 @@ def publication_metadata(run, source_directory, version, selected, source_sha256
             'program_review_state': 'deferred' if deferred else 'reviewed' if history else 'not_completed',
             'contract_errors': list(checks)}
     metadata.update(correction_metadata(source_directory, version, source_sha256))
+    if is_independent(run):
+        metadata.update(independent_evidence(run, version))
+        metadata['program_review_state'] = independent_review_state(run, fingerprint)
+        metadata['review_label'] = {'candidate': '完整双审候选', 'alternative': '表达备选',
+                                    'needs_revision': '需修订'}[review['verdict']]
+        if run['status'] == 'failed': metadata['review_label'] = '需修订'
+        metadata['user_selected'] = bool(selected)
     return metadata
 
 
@@ -215,7 +274,11 @@ def main():
     assert run['config']['dialogue_flow_version'] in {3, 4}
     assert run['config']['dialogue_model'] == 'gpt-6-sol'
     assert run['config']['reasoning_effort'] == 'high'
-    evolution = family_number >= 4
+    independent = is_independent(run)
+    evolution = family_number >= 4 or independent
+    if independent:
+        independent_evidence(run, args.version)
+        assert run.get('candidate_versions'), 'Independent complete draft requires archived snapshots'
     if evolution or args.selected:
         checks = contract_errors(template['source'], {**run, 'status': 'completed'})
         if args.selected:
@@ -236,6 +299,9 @@ def main():
         'messages.md': '\n\n'.join(f"{m['seq']} **{m['sender']}**：{m['content']}" for m in run['messages']).encode(),
         'messages.xlsx': export_xlsx(run),
     }
+    if run['config'].get('usage_context') == 'fictional_rehearsal':
+        artifacts['messages.md'] = ('# 虚构示例／内部排练稿\n\n人物及行为为虚构情节，不代表真实参与记录。\n\n'.encode('utf-8')
+                                   + artifacts['messages.md'])
     assert (root / '.vimax/sessions.json').is_file(), 'Existing session index required'
     assert Path(args.db).is_file(), 'Existing database required'
     index = SessionIndex(root)
@@ -290,6 +356,10 @@ def main():
                 program = {'deferred': '模型待审', 'reviewed': '模型已全文复核', 'not_completed': '模型审阅未完成'}[publication['program_review_state']]
                 record.update(project_name=args.version + ' · ' + human + ' · ' + program,
                               summary=publication['human_summary'])
+                if independent:
+                    record['project_name'] = (publication['display_label'] + ' · ' + publication['style_label']
+                                              + ' · ' + ('用户已选' if args.selected else publication['review_label'])
+                                              + ' · ' + program)
             record.setdefault('created_at', run['created_at'])
             record.setdefault('updated_at', run.get('updated_at', run['created_at']))
             sessions[project_id] = record
