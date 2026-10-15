@@ -163,11 +163,12 @@ async def process(session_id, api):
             latest["memory_status"]=memories
             api.save_run(latest)
             run=latest
-        async with httpx.AsyncClient(trust_env=False, timeout=90) as http_client:
+        model_timeout = float(os.getenv('MODEL_TIMEOUT_SECONDS', '90'))
+        async with httpx.AsyncClient(trust_env=False, timeout=model_timeout) as http_client:
             base,key,model_name = api.model_settings()
             chat = ChatOpenAI(model=run["config"].get("dialogue_model") or model_name,
                               api_key=key, base_url=base,
-                              streaming=True, max_retries=0, max_tokens=16000, timeout=90,
+                              streaming=True, max_retries=0, max_tokens=16000, timeout=model_timeout,
                               reasoning_effort=api.model_reasoning_effort(run["config"]) or ("low" if re.fullmatch(r"gpt-(?:5|6)(?:\.\d+)?",run["config"].get("dialogue_model") or model_name) else None), http_async_client=http_client)
             writer_type = screenwriter_class()
             contract = writing_contract(template, run)
