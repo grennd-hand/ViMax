@@ -201,7 +201,8 @@ def _successful_review(run, records):
 
 
 async def run_fresh(api, out, template, index, seed, code, template_sha, corpus_evidence,
-                    export_xlsx, customer_count=None, poll_seconds=15, attempt_label=None, material_notes=None):
+                    export_xlsx, customer_count=None, poll_seconds=15, attempt_label=None, material_notes=None,
+                    allow_review_done_without_stop=False):
     """Await the actual start_simulation task; no cancel-and-revise shortcut."""
     count = choose_customer_count(api, template['source'], seed, customer_count)
     config = api.SimulationConfig(template_id=template['id'], customer_count=count, target_messages=base.TARGET,
@@ -230,6 +231,7 @@ async def run_fresh(api, out, template, index, seed, code, template_sha, corpus_
             'seed': seed, 'customer_count': count, 'model': base.MODEL, 'reasoning_effort': base.EFFORT,
             'template_sha256': template_sha, 'code': code['commit'], 'provenance': code,
             'corpus': corpus_evidence, 'review_mode': 'full', 'counts_as_new_content': False,
+            'review_stream_policy': {'allow_done_without_stop_strict_json': allow_review_done_without_stop},
         }
         if attempt_label:
             run['version_record']['revision'] = attempt_label
@@ -242,9 +244,13 @@ async def run_fresh(api, out, template, index, seed, code, template_sha, corpus_
     async def tracked_review(template_argument, run):
         record = {'at': base.now(), 'messages_sha256': messages_hash(run.get('messages', [])),
                   'message_count': len(run.get('messages', [])), 'model': base.MODEL,
-                  'reasoning_effort': base.EFFORT, 'state': 'started', 'evidence': 'api.review_dialogue invocation'}
+                  'reasoning_effort': base.EFFORT, 'state': 'started', 'evidence': 'api.review_dialogue invocation',
+                  'stream_policy': {'allow_done_without_stop_strict_json': allow_review_done_without_stop}}
         records.append(record)
         _persist_reviews(api, out, run, records)
+        protocols = []
+        policy_token = api._run_allow_done_without_stop.set(allow_review_done_without_stop)
+        protocol_token = api._run_stream_protocol_records.set(protocols)
         try:
             result = await original_review(template_argument, run)
             record.update(state='returned', finished_at=base.now(), review=copy.deepcopy(result))
@@ -253,6 +259,9 @@ async def run_fresh(api, out, template, index, seed, code, template_sha, corpus_
             record.update(state='failed', finished_at=base.now(), error=_private_safe_error(exc))
             raise
         finally:
+            api._run_stream_protocol_records.reset(protocol_token)
+            api._run_allow_done_without_stop.reset(policy_token)
+            record['stream_protocol'] = copy.deepcopy(protocols)
             _persist_reviews(api, out, run, records)
 
     api.create_run, api.review_dialogue = isolated_create, tracked_review
@@ -355,7 +364,9 @@ async def execute(args):
         inputs = {'series': SERIES, 'index': args.index, 'seed': args.seed,
                   'attempt_label': attempt_label,
                   'template_path': str(Path(args.template).resolve()), 'template_sha256': base.sha(payload),
-                  'corpus': corpus_evidence, 'customer_count_override': args.customer_count}
+                  'corpus': corpus_evidence, 'customer_count_override': args.customer_count,
+                  'review_stream_policy': {'allow_done_without_stop_strict_json':
+                                           getattr(args, 'allow_review_done_without_stop', False)}}
         if material_notes is not None:
             inputs['material_notes'] = material_provenance(material_notes)
         base.save_json(out / 'input.json', inputs)
@@ -369,7 +380,8 @@ async def execute(args):
         return 1
     return await run_fresh(api, out, template, args.index, args.seed, code, base.sha(payload),
                            corpus_evidence, export_xlsx, args.customer_count, attempt_label=attempt_label,
-                           material_notes=material_notes)
+                            material_notes=material_notes,
+                            allow_review_done_without_stop=getattr(args, 'allow_review_done_without_stop', False))
 
 
 def main():
@@ -381,6 +393,8 @@ def main():
     parser.add_argument('--customer-count', type=int, choices=range(1, 21))
     parser.add_argument('--material-notes', type=Path, help='绑定本次seed与实际语料抽样的Agent选材注释JSON')
     parser.add_argument('--attempt-label', help='同一编号另建从零生成尝试，如V01-R001；不读旧稿，不另计独立编号')
+    parser.add_argument('--allow-review-done-without-stop', action='store_true',
+                        help='仅本次全文模型复核兼容已确认缺stop的网关；仍须DONE及严格完整JSON，默认关闭')
     args = parser.parse_args()
     with base.exclusive_lock(base.ROOT / '.vimax/deploy/independent-locks' / f'V{args.index:02d}.lock'):
         return asyncio.run(execute(args))

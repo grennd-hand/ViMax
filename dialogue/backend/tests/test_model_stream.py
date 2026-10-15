@@ -46,16 +46,21 @@ class Chunks(httpx.AsyncByteStream):
 
 
 class ModelStreamTests(unittest.IsolatedAsyncioTestCase):
-    async def call(self, handler, *, stream=True, budget=.4, effort="high", model="gpt-6-sol", payload=None, fallback=""):
+    async def call(self, handler, *, stream=True, budget=.4, effort="high", model="gpt-6-sol", payload=None, fallback="",
+                   allow_done_without_stop=False, protocol_records=None):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             token = api._run_model_client.set(client)
             effort_token = api._run_reasoning_effort.set(None)
+            policy_token = api._run_allow_done_without_stop.set(allow_done_without_stop)
+            protocol_token = api._run_stream_protocol_records.set(protocol_records)
             try:
                 with patch.object(api, "model_settings", return_value=("https://example.invalid/v1", "test-key", model)), \
                         patch.object(api, "model_reasoning_effort", return_value=effort), \
                         patch.dict(os.environ, {"MODEL_FALLBACK_NAME": fallback, "MODEL_TIMEOUT_SECONDS": ".01"}):
                     return await api.model_json("Review", payload or {}, stream=stream, call_budget_seconds=budget)
             finally:
+                api._run_stream_protocol_records.reset(protocol_token)
+                api._run_allow_done_without_stop.reset(policy_token)
                 api._run_reasoning_effort.reset(effort_token)
                 api._run_model_client.reset(token)
 
@@ -348,6 +353,89 @@ class ModelStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("\x00", rendered)
         self.assertLess(len(rendered), 500)
         self.assertEqual(len(requests), 2)
+
+    async def test_recorded_gateway_frame_shape_requires_explicit_compatibility_and_reports_missing_stop(self):
+        # Same frame shape/content split as minimal-raw-sse-02, with fixture IDs.
+        fragments = [{"role": "assistant"}, {"reasoning_content": "fixture reasoning"}]
+        fragments += [{"content": part} for part in ['{"', 'ok', '":', 'true', '}']]
+        text = ''.join(event({"id": "offline-fixture", "created": 0, "model": "gpt-6-sol",
+                              "object": "chat.completion.chunk", "choices": [
+                                  {"index": 0, "delta": value, "finish_reason": None}]}) for value in fragments)
+        text += "data: [DONE]\n\n"
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                requests, protocols = [], []
+                def handler(request):
+                    requests.append(json.loads(request.content))
+                    return httpx.Response(200, stream=Chunks([text.encode()]))
+                if enabled:
+                    self.assertEqual(await self.call(handler, allow_done_without_stop=True,
+                                                     protocol_records=protocols), {"ok": True})
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(protocols, [{"model": "gpt-6-sol", "stop_received": False,
+                        "done_received": True, "allow_done_without_stop": True, "compatibility_used": True,
+                        "strict_json_validated": True, "json_type": "object", "json_fence": False}])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "未正常结束即返回DONE"):
+                        await self.call(handler, protocol_records=protocols)
+                    self.assertEqual(len(requests), 2)
+                    self.assertEqual(protocols, [])
+                self.assertTrue(all(body['model'] == 'gpt-6-sol' and body['reasoning_effort'] == 'high'
+                                    and body['stream'] for body in requests))
+        self.assertFalse(api._run_allow_done_without_stop.get())
+
+    async def test_missing_stop_compatibility_accepts_only_whole_json_object_or_array_and_single_fence(self):
+        for content, payload, expected in [('{"ok":true}', {}, {"ok": True}),
+                                           ('```json\n{"ok":true}\n```', {}, {"ok": True}),
+                                           ('```\n{"ok":true}\n```', {}, {"ok": True}),
+                                           ('[]', {"scene_draft": True}, {"turns": []}),
+                                           ('```json\n[{}]\n```', {"story_plan": True}, {"beats": [{}]})]:
+            with self.subTest(content=content):
+                text = delta(content) + "data: [DONE]"  # Final blank line is optional.
+                self.assertEqual(await self.call(lambda request: httpx.Response(200, stream=Chunks([text.encode()])),
+                                                 allow_done_without_stop=True, payload=payload), expected)
+        invalid = ['', ' ', '{"ok":', '[{}', 'prefix {"ok":true}', '{"ok":true} suffix', '{}{}',
+                   'null', 'true', '42', '"text"', '{"ok":NaN}', '{"ok":Infinity}',
+                   '```json\n{}\n``` explanation', 'explanation ```json\n{}\n```',
+                   '```json\n{}\n```\n```json\n{}\n```', '```json\n```json\n{}\n```\n```']
+        for content in invalid:
+            with self.subTest(content=content):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, stream=Chunks([(delta(content) + "data: [DONE]\n\n").encode()]))
+                with self.assertRaises(RuntimeError):
+                    await self.call(handler, allow_done_without_stop=True)
+                self.assertEqual(len(requests), 2)
+
+    async def test_compatibility_still_rejects_explicit_bad_finish_refusal_error_and_no_done(self):
+        cases = [(delta('{"ok":true}'), False),
+                 (delta('{"ok":true}') + delta(finish='stop'), False),
+                 (delta('{"ok":true}') + delta(finish='length') + 'data: [DONE]\n\n', False),
+                 (delta('{"ok":true}') + event({'error': {'message': 'failed'}}) + 'data: [DONE]\n\n', False),
+                 (delta('{"ok":true}') + delta(finish='content_filter') + 'data: [DONE]\n\n', True),
+                 (delta(refusal='I cannot help with this request.') + 'data: [DONE]\n\n', True),
+                 (delta('I cannot help with this request.') + 'data: [DONE]\n\n', True),
+                 (delta('{"refusal":"I cannot help with this request."}') + 'data: [DONE]\n\n', True)]
+        for text, refusal in cases:
+            with self.subTest(text=text):
+                requests = []
+                def handler(request):
+                    requests.append(request)
+                    return httpx.Response(200, stream=Chunks([text.encode()]))
+                with self.assertRaises(ModelRefusalError if refusal else RuntimeError):
+                    await self.call(handler, allow_done_without_stop=True)
+                self.assertEqual(len(requests), 1 if refusal else 2)
+
+    async def test_normal_stop_records_actual_protocol_even_when_compatibility_is_available(self):
+        protocols = []
+        result = await self.call(lambda request: httpx.Response(200, stream=Chunks([complete('{"ok":true}').encode()])),
+                                 allow_done_without_stop=True, protocol_records=protocols)
+        self.assertEqual(result, {"ok": True})
+        self.assertTrue(protocols[0]['stop_received'])
+        self.assertTrue(protocols[0]['done_received'])
+        self.assertFalse(protocols[0]['compatibility_used'])
+        self.assertFalse(protocols[0]['strict_json_validated'])
 
 
 if __name__ == "__main__":

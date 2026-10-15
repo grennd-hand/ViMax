@@ -82,6 +82,7 @@ def independent_planning_requirement(run: dict) -> str:
     schema = copy.deepcopy(OrganicPlan.model_json_schema())
     descriptions = {
         'PersonIntent': {
+            'personal_now': '本人此刻在意的生活状况、工作、关系、情绪或兴趣，只有本人知道；不局限于手边物件和正在做的小动作',
             'wants': '本人此刻想做、想说或想感受的事；可以只是好奇、分享或想被听见，不必是待解决的问题',
             'attention': '结合人格，哪些见闻、喜好、话语或处境会吸引本人注意',
             'reply_when': '本人愿意怎样接哪类话；可以回应感受、表达喜恶、开玩笑或继续分享',
@@ -92,7 +93,7 @@ def independent_planning_requirement(run: dict) -> str:
             'seed': '可聊的见闻、喜好、玩笑、经历或疑问及其具体内容，保留继续交流的可能',
         },
         'ConversationBeat': {
-            'description': '一份可自由展开的交流素材，可以是分享、感受、玩笑、好奇或实际需要',
+            'description': '一份有具体内容的交流素材：当事人碰到什么、怎么看，哪里可能让别人愿意接话；分享、感受、玩笑或好奇都可以，不必有待解决难题',
             'process_chain': '素材中可供回应、联想或继续分享的具体内容；不是必须依次完成的动作',
             'cause': '本人此时为什么想开口，可以只是感兴趣或想分享',
             'outcome': '交流可能留下的内容、感受、认识或动作；日常交流不必解决问题或贡献业务目标',
@@ -116,6 +117,7 @@ def independent_planning_requirement(run: dict) -> str:
         '兴趣和情绪可以自行引起开口，不需要等业务结束或从任务态度转译成生活话题。'
         '按目标篇幅准备有具体内容、能够持续交流的素材，数量随内容需要；'
         '素材可以展开较长，也可以只用一点，不用排满事件上限或逐人传故事。'
+        '生活素材应有可说的见闻、看法、心情或经历，不只设置眼前物件再反复更新它的状态。'
         'events和threads是可选素材，不是时间表；index从0连续，is_last只表示素材列表结束，'
         '不分配消息区间、发言配额或固定执行者。trigger和stop_when记录自然聊起与停下的可能。'
         '必要业务事实和原值只来自母本，保持活动条件、链接、联系人和代码；愿意者依公开说明完成母本目标。'

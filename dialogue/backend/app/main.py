@@ -51,6 +51,8 @@ tasks: dict[str, asyncio.Task] = {}
 _reasoning_unsupported: set[tuple[str, str]] = set()
 _run_model_client: ContextVar[httpx.AsyncClient | None] = ContextVar("run_model_client", default=None)
 _run_reasoning_effort: ContextVar[str | None] = ContextVar("run_reasoning_effort", default=None)
+_run_allow_done_without_stop: ContextVar[bool] = ContextVar("run_allow_done_without_stop", default=False)
+_run_stream_protocol_records: ContextVar[list | None] = ContextVar("run_stream_protocol_records", default=None)
 
 
 @contextmanager
@@ -268,7 +270,8 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                 try:
                     if stream:
                         response, content = await stream_model_content(
-                            client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline)
+                            client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline,
+                            allow_done_without_stop=_run_allow_done_without_stop.get())
                     else:
                         response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
                                                      timeout=min(request_timeout, remaining))
@@ -290,10 +293,15 @@ async def model_json(system: str, payload: dict, *, temperature: float = 0.7, mo
                             body.pop("reasoning_effort")
                             if stream:
                                 response, content = await stream_model_content(
-                                    client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline)
+                                    client, f"{base}/chat/completions", headers=headers, body=body, deadline=deadline,
+                                    allow_done_without_stop=_run_allow_done_without_stop.get())
                             else:
                                 response = await client.post(f"{base}/chat/completions", headers=headers, json=body,
                                                              timeout=max(.01, min(request_timeout, deadline - time.monotonic())))
+                    protocol = response.extensions.get('vimax_stream_protocol') if stream else None
+                    protocol_records = _run_stream_protocol_records.get()
+                    if protocol is not None and protocol_records is not None:
+                        protocol_records.append({'model': candidate, **protocol})
                     if not response.is_success:
                         try:
                             check_model_refusal(response.json(), secrets=(base, key))

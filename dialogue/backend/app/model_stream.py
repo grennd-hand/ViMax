@@ -82,8 +82,30 @@ def plain_text_refusal(content):
                 or re.search(direct_chinese, text) or re.search(bare_chinese, text))
 
 
+def _strict_done_json(content, *, secrets):
+    """Validate the entire body before accepting a gateway's missing stop marker."""
+    text = content.strip()
+    fenced = text.startswith('```')
+    if fenced:
+        match = re.fullmatch(r'```(?:json)?[ \t]*\r?\n(.*?)\r?\n```', text, re.I | re.S)
+        if not match:
+            raise ValueError('缺stop兼容模式要求单层完整JSON代码块')
+        text = match[1].strip()
+    if plain_text_refusal(text):
+        raise ModelRefusalError('refusal', text, secrets=secrets)
+
+    def reject_constant(value):
+        raise ValueError('缺stop兼容模式不接受非标准JSON常量')
+
+    value = json.loads(text, parse_constant=reject_constant)
+    if not isinstance(value, (dict, list)):
+        raise ValueError('缺stop兼容模式要求完整JSON对象或数组')
+    check_model_refusal(value, secrets=secrets)
+    return {'json_type': 'object' if isinstance(value, dict) else 'array', 'json_fence': fenced}
+
+
 async def stream_model_content(client, url: str, *, headers: dict, body: dict,
-                               deadline: float):
+                               deadline: float, allow_done_without_stop: bool = False):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("模型流式响应超过总等待上限")
@@ -108,8 +130,14 @@ async def stream_model_content(client, url: str, *, headers: dict, body: dict,
                     return False
                 payload = "\n".join(data)
                 if payload.strip() == "[DONE]":
-                    if not stopped:
+                    if not stopped and not allow_done_without_stop:
                         raise ValueError("模型流未正常结束即返回DONE")
+                    validation = _strict_done_json(''.join(fragments), secrets=secrets) if not stopped else {}
+                    response.extensions['vimax_stream_protocol'] = {
+                        'stop_received': stopped, 'done_received': True,
+                        'allow_done_without_stop': allow_done_without_stop,
+                        'compatibility_used': not stopped,
+                        'strict_json_validated': not stopped, **validation}
                     return True
                 chunk = json.loads(payload)
                 check_model_refusal(chunk, secrets=secrets)

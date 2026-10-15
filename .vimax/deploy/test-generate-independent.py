@@ -10,6 +10,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+import httpx
 
 
 HERE = Path(__file__).resolve().parent
@@ -53,9 +54,11 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError('old dialogue read attempted')
         return self.original_read(path)
 
-    def args(self, index=1, seed='offline-seed', customer_count=None, attempt_label=None, material_notes=None):
+    def args(self, index=1, seed='offline-seed', customer_count=None, attempt_label=None, material_notes=None,
+             allow_review_done_without_stop=False):
         return SimpleNamespace(index=index, seed=seed, customer_count=customer_count, attempt_label=attempt_label,
-                               template=driver.DEFAULT_TEMPLATE, corpus_path=self.corpus_path, material_notes=material_notes)
+                               template=driver.DEFAULT_TEMPLATE, corpus_path=self.corpus_path, material_notes=material_notes,
+                               allow_review_done_without_stop=allow_review_done_without_stop)
 
     def notes_fixture(self, index=1, seed='offline-seed'):
         corpus = load_corpus(self.corpus_path)
@@ -91,6 +94,7 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
 
     def worker(self, mode='pass'):
         async def process(session_id):
+            self.assertFalse(api._run_allow_done_without_stop.get())  # Writing/planning stay strict.
             run = api.get_run(session_id)
             self.initial.append(copy.deepcopy(run))
             self.assertFalse(run['messages'])
@@ -120,6 +124,7 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
                     api.save_run(run)
                     engine.checkpoint_candidate(api, run, run['messages'], 'offline repair candidate retained')
                     result = await api.review_dialogue(api.get_template(run['template_id']), run)
+                self.assertFalse(api._run_allow_done_without_stop.get())
                 run['quality_review'] = result['issues']
                 run['outcome_review'] = {'met': result['goal_met'], 'reason': result['goal_reason']}
                 if mode == 'review_then_drift':
@@ -182,6 +187,48 @@ class IndependentGenerationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(driver.base.sha((out / 'sources' / relative).read_bytes()), digest)
         self.assertIn('.vimax/deploy/generate-independent.py', provenance['source_hashes'])
         self.assertEqual((out / 'template.json').read_bytes(), driver.DEFAULT_TEMPLATE.read_bytes())
+        self.assertFalse(run['version_record']['review_stream_policy']['allow_done_without_stop_strict_json'])
+        self.assertFalse(run['program_review_history'][0]['stream_policy']['allow_done_without_stop_strict_json'])
+
+    async def test_missing_stop_policy_is_explicit_review_only_and_archives_actual_protocol(self):
+        requests = []
+        review_body = {'issues': [], 'goal_met': True, 'goal_reason': 'offline complete review'}
+        text = ('data: ' + json.dumps({'choices': [{'index': 0, 'delta': {
+            'content': json.dumps(review_body)}, 'finish_reason': None}]}) + '\n\ndata: [DONE]\n\n').encode()
+        def handler(request):
+            requests.append(json.loads(request.content))
+            return httpx.Response(200, content=text)
+        async def streamed_review(template, run):
+            self.assertTrue(api._run_allow_done_without_stop.get())
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                token = api._run_model_client.set(client)
+                try:
+                    return await api.model_json('Offline review', {}, stream=True, call_budget_seconds=.4)
+                finally:
+                    api._run_model_client.reset(token)
+        code, _ = await self.invoke(self.args(allow_review_done_without_stop=True), review=streamed_review)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(requests), 1)
+        self.assertFalse(api._run_allow_done_without_stop.get())
+        self.assertIsNone(api._run_stream_protocol_records.get())
+        out = self.root / 'outputs/独立随机-20261015/V01'
+        run = json.loads((out / 'run.json').read_bytes())
+        history = run['program_review_history'][0]
+        self.assertTrue(history['stream_policy']['allow_done_without_stop_strict_json'])
+        self.assertEqual(history['stream_protocol'], [{'model': 'gpt-6-sol', 'stop_received': False,
+            'done_received': True, 'allow_done_without_stop': True, 'compatibility_used': True,
+            'strict_json_validated': True, 'json_type': 'object', 'json_fence': False}])
+        self.assertEqual(history, json.loads((out / 'review-calls.json').read_bytes())[0])
+        self.assertTrue(json.loads((out / 'input.json').read_bytes())['review_stream_policy']['allow_done_without_stop_strict_json'])
+
+    async def test_missing_stop_review_policy_is_reset_on_failure(self):
+        async def failed_review(template, run):
+            self.assertTrue(api._run_allow_done_without_stop.get())
+            raise RuntimeError('offline stream failure')
+        code, _ = await self.invoke(self.args(allow_review_done_without_stop=True), review=failed_review)
+        self.assertEqual(code, 1)
+        self.assertFalse(api._run_allow_done_without_stop.get())
+        self.assertIsNone(api._run_stream_protocol_records.get())
 
     async def test_bound_agent_notes_drive_only_fresh_story_notes_and_are_archived_verbatim(self):
         document, _ = self.notes_fixture()
