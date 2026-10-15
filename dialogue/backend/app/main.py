@@ -35,6 +35,7 @@ from .scene_memory import apply_review_actions, apply_review_decisions, apply_re
 from .story_arc import fallback_story_arc, normalize_story_arc, normalize_story_topics, source_topic_arc
 from .team import _public_role_status, _task_state, generate_team_batch, goal_requires_action
 from .creative_variation import create_variation_plan, validate_fresh_input
+from .independent_writing import REVIEW_PROMPT as INDEPENDENT_REVIEW_PROMPT
 from .dialogue_corpus import load_corpus, sample_reference
 
 APP_DIR = Path(__file__).resolve().parents[2]
@@ -828,6 +829,7 @@ STAGE_FOCUS = {
 
 async def review_dialogue(template: dict, run: dict) -> dict:
     result = await model_json(
+        INDEPENDENT_REVIEW_PROMPT if run['config'].get('creation_mode') == 'independent_random' else (
         "审阅一份模拟群聊的对话逻辑与群聊读感。检查说话人身份错乱、答非所问、前后矛盾、严重重复、步骤在解释前就被当作完成、"
         "客户尚未明确退出却被当作退出，以及必要因果关系被颠倒（如入口公布前已打开、点赞前已截图）。一个具体问题在坐席回答后，若后续三条以上只是不同人重复确认同一答案，"
         "也必须标出开始原地打转的消息；除非出现新的事实或新的疑问。多个角色接连附加相同的假设性提醒、没有推进实际状态，也要指出。"
@@ -882,7 +884,7 @@ async def review_dialogue(template: dict, run: dict) -> dict:
         "memory_enabled 为 true 且 issues 为空时，顺便从当前最终台词提取 memory_reflections：每项含 role、"
         "kind（preference 或 relationship）、insight、peer（关系对象，否则 null）、evidence_seq（台词编号数组）。"
         "insight 用 output_language 写一句本人实际表达过的偏好或对他人的认识，关系需有具体互动。"
-        "不得虚构、改变稳定人格或沿用本轮已提交、已打开、暂停等操作状态；没有依据时为空数组。",
+        "不得虚构、改变稳定人格或沿用本轮已提交、已打开、暂停等操作状态；没有依据时为空数组。"),
         {"goal": template["analysis"].get("primary_goal"),
          "opening_contract": opening_requirement(run) if run['config'].get('opening_policy') else None,
          "public_decisions": decision_ledger(run),
