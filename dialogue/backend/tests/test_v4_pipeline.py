@@ -3,13 +3,24 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.opening import opening_policy
-from app.vimax_engine import decode_scenes, process, revise
+from app.vimax_engine import RecordedChat, decode_scenes, process, revise
 
 
 class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_model_call_is_visible_without_archiving_private_error_text(self):
+        state = {'status': 'running'}
+        chat = SimpleNamespace(model_name='gpt-6-sol', reasoning_effort='high',
+                               ainvoke=AsyncMock(side_effect=RuntimeError('private-provider-setting')))
+        api = SimpleNamespace(get_run=lambda _: state, save_run=lambda run: None)
+        with self.assertRaises(RuntimeError):
+            await RecordedChat(chat, api, 'fixture', 'independent_full_draft').ainvoke([])
+        self.assertEqual(state['vimax_failed_calls'][0]['error_type'], 'RuntimeError')
+        self.assertFalse(state['vimax_failed_calls'][0]['response_received'])
+        self.assertNotIn('private-provider-setting', str(state))
+
     async def run_case(self, invalid_first=False, independent=False, malformed_first=False):
         roles = ['坐席', '客户1', '客户2']
         state = {'id': 'd' * 32, 'template_id': 'source', 'status': 'running', 'cursor': 0,

@@ -1,6 +1,6 @@
 import json
 import unittest
-from app.narrative_plan import DialogueEvent, module, parse_plan
+from app.narrative_plan import DialogueEvent, OrganicPlan, module, parse_plan, planning_requirement
 
 
 class NovelEventPlanTests(unittest.TestCase):
@@ -70,3 +70,47 @@ class NovelEventPlanTests(unittest.TestCase):
                 data['events'][0]['roles'] = ['未知群友']
             with self.assertRaises(ValueError):
                 parse_plan(json.dumps(data), self.run)
+
+    def test_independent_requirement_accepts_sharing_without_a_problem_to_solve(self):
+        self.organic_plan()
+        self.run['config'].update(creation_mode='independent_random', target_messages=150)
+        requirement = planning_requirement(self.run)
+        self.assertIn('分享见闻、随口玩笑、感受与兴趣本身都能成为话题', requirement)
+        self.assertIn('不要求每人有问题', requirement)
+        self.assertIn('数量随内容需要', requirement)
+        self.assertNotIn('提出新话题的人须有当时的实际疑问', requirement)
+        self.assertNotIn('长篇也只准备少数', requirement)
+        schema = json.loads(requirement.rsplit('：\n', 1)[1])
+        self.assertEqual(schema['required'], ['events', 'threads', 'people'])
+        self.assertEqual(schema['properties']['events']['maxItems'], 18)
+        self.assertIn('想被听见', schema['$defs']['PersonIntent']['properties']['wants']['description'])
+        self.assertIn('日常交流不必解决问题', schema['$defs']['ConversationBeat']['properties']['outcome']['description'])
+
+    def test_independent_sharing_plan_keeps_parser_media_and_private_context_contracts(self):
+        data = self.organic_plan()
+        self.run['config'].update(creation_mode='independent_random', target_messages=150)
+        event = data['events'][0]
+        event.update(description='看到一朵云，想说一句', process_chain=['分享形状', '对方可能接一句喜好'],
+                     cause='刚好想被听见', outcome='分享过这个见闻', trigger='本人想分享',
+                     stop_when='说够或没人接就停')
+        data['threads'][0].update(topic='路上见闻', kind='日常', seed='一朵有趣的云')
+        data['people'][1].update(wants='想分享而非求助', reply_when='听到有趣的形容就接一句')
+        result = parse_plan(json.dumps(data), self.run)
+        self.assertEqual(result[0]['outcome'], '分享过这个见闻')
+        self.assertEqual(self.run['person_situations']['客户1']['wants'], '想分享而非求助')
+        requirement = planning_requirement(self.run)
+        for boundary in ('必要业务事实和原值只来自母本', '先公开说明，再操作和截图',
+                         '母本要求截图发群时', '别人依据此前公开的话回应', '人物起初陌生'):
+            self.assertIn(boundary, requirement)
+
+    def test_independent_schema_descriptions_do_not_change_fixed_mode(self):
+        self.organic_plan()
+        self.run['config']['creation_mode'] = 'fixed'
+        schema_before = OrganicPlan.model_json_schema()
+        fixed_before = planning_requirement(self.run)
+        self.run['config']['creation_mode'] = 'independent_random'
+        planning_requirement(self.run)
+        self.run['config']['creation_mode'] = 'fixed'
+        self.assertEqual(planning_requirement(self.run), fixed_before)
+        self.assertEqual(OrganicPlan.model_json_schema(), schema_before)
+        self.assertIn('提出新话题的人须有当时的实际疑问', fixed_before)

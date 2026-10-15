@@ -583,10 +583,14 @@ async def start_simulation(config: SimulationConfig) -> dict:
     variation = None
     reference = None
     if config.creation_mode == "independent_random":
+        fixed_cards = dict(normalized_config["persona_cards"])
+        for role, identity in config.personas.items():
+            if role in roles and identity and role not in fixed_cards:
+                fixed_cards[role] = {"identity": identity}
         try:
             variation = create_variation_plan(
                 roles, config.language, seed=config.variation_seed,
-                fixed_persona_cards=None if config.randomize_personas else normalized_config["persona_cards"],
+                fixed_persona_cards=None if config.randomize_personas else fixed_cards,
                 fixed_persona_sources=None if config.randomize_personas else config.persona_sources,
                 fixed_persona_versions=None if config.randomize_personas else config.persona_versions,
             )
@@ -885,6 +889,10 @@ async def review_dialogue(template: dict, run: dict) -> dict:
          "completion_actions": template["analysis"].get("completion_actions"),
          "persona_cards": run["config"].get("persona_cards", {}),
          "private_character_intents": run.get("person_situations", {}) if run['config'].get('dialogue_flow_version', 1) >= 3 else {},
+         "creative_variation": run.get("creative_variation"),
+         "style_review_policy": ("按本份五维风格与人物实际交流判断；分享、喜恶、吐槽、调侃和短回应本身有意义，"
+                                 "不要求引出难题、提供建议或改变决定，也不把风格统一修成解释充分的问答。"
+                                 if run['config'].get('creation_mode') == 'independent_random' else None),
          "rolling_conversation": run["config"].get("dialogue_flow_version", 1) >= 2,
          "naturalness_evidence": naturalness_evidence(run["messages"]),
          "memory_enabled": bool(run["config"].get("memory_enabled") and run.get("character_bindings")),

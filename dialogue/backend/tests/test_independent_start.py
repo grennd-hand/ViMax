@@ -58,6 +58,12 @@ class IndependentStartTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(runs[0]['creative_variation']['seed'], runs[1]['creative_variation']['seed'])
         self.assertNotEqual(runs[0]['creative_variation'], runs[1]['creative_variation'])
 
+    async def test_current_persona_choice_preserves_explicit_identity_with_fresh_world(self):
+        runs = await self.start(randomize_personas=False, personas={'客户1': '话少但很爱音乐'}, story_world='old')
+        self.assertEqual(runs[0]['config']['persona_cards']['客户1']['identity'], '话少但很爱音乐')
+        self.assertEqual(runs[0]['creative_variation']['fixed_roles'], ['客户1'])
+        self.assertNotEqual(runs[0]['config']['story_world'], 'old')
+
     async def test_fixed_mode_does_not_replace_explicit_persona_or_attach_random_profile(self):
         runs = await self.start(creation_mode='fixed', persona_cards={'客户1': {'identity': '用户选择的人物'}}, story_world='keep-world')
         for run in runs:

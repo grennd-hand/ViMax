@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 from pathlib import Path
 from typing import Literal
@@ -74,7 +75,57 @@ class OrganicPlan(BaseModel):
 DialoguePlan.model_rebuild()
 
 
+def independent_planning_requirement(run: dict) -> str:
+    # Adapt descriptions for fresh creation, keeping the shared parser and
+    # fixed-mode schema untouched. These are still the same OrganicPlan fields.
+    schema = copy.deepcopy(OrganicPlan.model_json_schema())
+    descriptions = {
+        'PersonIntent': {
+            'wants': '本人此刻想做、想说或想感受的事；可以只是好奇、分享或想被听见，不必是待解决的问题',
+            'attention': '结合人格，哪些见闻、喜好、话语或处境会吸引本人注意',
+            'reply_when': '本人愿意怎样接哪类话；可以回应感受、表达喜恶、开玩笑或继续分享',
+            'voice': '本人自然的表达长度、节奏和直接程度，随交流需要变化',
+            'experience_seed': '本人可能愿意提起的见闻或经历及具体细节；可留空，是否分享由当时兴趣决定',
+        },
+        'ConversationThread': {
+            'seed': '可聊的见闻、喜好、玩笑、经历或疑问及其具体内容，保留继续交流的可能',
+        },
+        'ConversationBeat': {
+            'description': '一份可自由展开的交流素材，可以是分享、感受、玩笑、好奇或实际需要',
+            'process_chain': '素材中可供回应、联想或继续分享的具体内容；不是必须依次完成的动作',
+            'cause': '本人此时为什么想开口，可以只是感兴趣或想分享',
+            'outcome': '交流可能留下的内容、感受、认识或动作；日常交流不必解决问题或贡献业务目标',
+            'trigger': '什么情境、兴趣或公开话语可能引出它；本人想分享也可以成为起点',
+            'stop_when': '本人说够、兴趣转移或无人接话时可以停下，不要求得到答案或统一结论',
+        },
+    }
+    for name, fields in descriptions.items():
+        for field, description in fields.items():
+            schema['$defs'][name]['properties'][field]['description'] = description
+    return (
+        '\n' + opening_requirement(run) +
+        '这是从零创作本份群聊的素材规划，按本份人格和风格方案形成各人的关注、表达节奏与接话意愿。'
+        'people覆盖名单是人物画像，不是发言任务；wants可以是想分享、好奇、表达喜恶或仅想被听见，'
+        'reply_when写本人愿意接什么话，不要求每人有问题，也不要求每句帮助别人或贡献业务目标。'
+        '分享见闻、随口玩笑、感受与兴趣本身都能成为话题；可以接着聊、略过、意见不同或自然转开。'
+        '按目标篇幅准备有具体内容、能够持续交流的素材，数量随内容需要；'
+        '素材可以展开较长，也可以只用一点，不用排满事件上限或逐人传故事。'
+        'events和threads是可选素材，不是时间表；index从0连续，is_last只表示素材列表结束，'
+        '不分配消息区间、发言配额或固定执行者。trigger和stop_when记录自然聊起与停下的可能。'
+        '必要业务事实和原值只来自母本，保持活动条件、链接、联系人和代码；愿意者依公开说明完成母本目标。'
+        '操作和截图遵守实际因果：先公开说明，再操作和截图，随后按母本顺序提交；'
+        '母本要求截图发群时，规划相应图片事件，素材码放媒体字段。申请提交与外部确认、到账分开。'
+        '每人的私有处境只约束本人，别人依据此前公开的话回应；生活见闻可创作，业务规则和外部结果依母本。'
+        '人物起初陌生，关系随实际交流形成；规划本身不代表背景、动作或共同过去已经公开发生。'
+        '保留读懂交流所需的对象与前因，字段简洁；仅返回以下JSON结构，所有说明使用输出语言：\n' +
+        json.dumps(schema, ensure_ascii=False)
+    )
+
+
 def planning_requirement(run: dict) -> str:
+    if (run['config'].get('creation_mode') == 'independent_random'
+            and run['config'].get('dialogue_flow_version', 1) >= 3):
+        return independent_planning_requirement(run)
     if run['config'].get('dialogue_flow_version', 1) >= 3:
         return (
             '\n' + opening_requirement(run) +

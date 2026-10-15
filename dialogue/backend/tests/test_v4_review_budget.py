@@ -14,6 +14,19 @@ def tearDownModule():
 
 
 class ReviewBudgetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_independent_review_receives_its_own_style_without_mutating_it(self):
+        template = {'source': {'messages': [], 'accounts': [], 'codes': []}, 'analysis': {}}
+        run = {'config': {'dialogue_flow_version': 4, 'creation_mode': 'independent_random'},
+               'creative_variation': {'style_label': '碎句接话', 'axes': {'rhythm': 'fragments'}}, 'messages': []}
+        before = copy.deepcopy(run)
+        model = AsyncMock(return_value={'issues': [], 'goal_met': True, 'goal_reason': 'test'})
+        with patch.object(main, 'model_json', model):
+            await main.review_dialogue(template, run)
+        payload = model.call_args.args[1]
+        self.assertEqual(payload['creative_variation'], run['creative_variation'])
+        self.assertIn('不要求引出难题', payload['style_review_policy'])
+        self.assertEqual(run, before)
+
     async def test_review_preserves_interleaved_reply_and_timing_evidence(self):
         template = {'source': {'messages': [], 'accounts': [], 'codes': []}, 'analysis': {}}
         run = {'config': {'dialogue_flow_version': 4}, 'messages': [
