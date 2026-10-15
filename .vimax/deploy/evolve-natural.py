@@ -220,7 +220,7 @@ def isolated_create(api, run):
 async def create_child(api, previous, template, version, parent_hash, evidence, code):
     config = {k: copy.deepcopy(v) for k, v in previous['config'].items() if k in api.SimulationConfig.model_fields}
     config.update(template_id=template['id'], target_messages=TARGET, dialogue_model=MODEL,
-                  reasoning_effort=EFFORT, character_ids={}, story_world=f'natural-20261015-v{version:02d}-{uuid.uuid4().hex[:12]}')
+                  reasoning_effort=EFFORT, creation_mode='fixed', character_ids={}, story_world=f'natural-20261015-v{version:02d}-{uuid.uuid4().hex[:12]}')
     original_create = api.create_run
     api.create_run = lambda run: isolated_create(api, run)
     try:

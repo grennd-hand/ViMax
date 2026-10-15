@@ -34,10 +34,13 @@ from .memory_cognition import prepare_memory_context
 from .scene_memory import apply_review_actions, apply_review_decisions, apply_review_progress, decision_ledger, scene_candidates, scene_ledger
 from .story_arc import fallback_story_arc, normalize_story_arc, normalize_story_topics, source_topic_arc
 from .team import _public_role_status, _task_state, generate_team_batch, goal_requires_action
+from .creative_variation import create_variation_plan, validate_fresh_input
+from .dialogue_corpus import load_corpus, sample_reference
 
 APP_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = Path(os.getenv("SCRIPT_GENERATOR_DATA_DIR", APP_DIR.parents[0] / ".vimax" / "dialogue"))
 DB_PATH = DATA_DIR / "app.sqlite3"
+CORPUS_PATH = Path(os.getenv("DIALOGUE_CORPUS_FILE", DATA_DIR / "dialogue-corpus" / "lccc.json"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="剧本对话模拟器")
@@ -149,7 +152,9 @@ def create_run(run: dict) -> None:
     if str(root) not in sys.path: sys.path.insert(0, str(root))
     from agent_runtime.session_index import SessionIndex
     run["vimax_project_id"] = "dialogue-" + run["id"]
-    SessionIndex(root).create(session_id=run["vimax_project_id"], project_name="母本群聊", idea=get_template(run["template_id"])["analysis"]["primary_goal"], style="dialogue")
+    variation = run.get("creative_variation")
+    title = "独立随机 · " + variation["style_label"] if variation else "母本群聊"
+    SessionIndex(root).create(session_id=run["vimax_project_id"], project_name=title, idea=get_template(run["template_id"])["analysis"]["primary_goal"], style="dialogue")
     with db() as connection:
         bind_characters(connection, run)
         connection.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)",
@@ -158,6 +163,8 @@ def create_run(run: dict) -> None:
 
 def cached_story_arc(run: dict) -> list[dict] | None:
     """Reuse a source-backed plot only for the same source, cast, language and persona snapshot."""
+    if run.get("config", {}).get("creation_mode") == "independent_random":
+        return None
     keys = ("target_messages", "customer_count", "language", "story_notes", "persona_cards")
     with db() as connection:
         rows = connection.execute("SELECT run_json FROM sessions WHERE template_id=? AND id<>? "
@@ -397,6 +404,9 @@ class SimulationConfig(BaseModel):
     language: str = "zh-CN"
     dialogue_model: Literal["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol"] | None = None
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    creation_mode: Literal["independent_random", "fixed"] = "independent_random"
+    variation_seed: str | None = Field(default=None, max_length=80)
+    randomize_personas: bool = True
 
     @field_validator("language")
     @classmethod
@@ -570,9 +580,30 @@ async def start_simulation(config: SimulationConfig) -> dict:
     schedule = opening_schedule(schedule, normalized_config['opening_policy'])
     normalized_config["reasoning_effort"] = model_reasoning_effort(normalized_config)
     roles = ["坐席"] + template["source"]["accounts"] + [f"客户{i + 1}" for i in range(config.customer_count)]
+    variation = None
+    reference = None
+    if config.creation_mode == "independent_random":
+        try:
+            variation = create_variation_plan(
+                roles, config.language, seed=config.variation_seed,
+                fixed_persona_cards=None if config.randomize_personas else normalized_config["persona_cards"],
+                fixed_persona_sources=None if config.randomize_personas else config.persona_sources,
+                fixed_persona_versions=None if config.randomize_personas else config.persona_versions,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, "独立创作设置不正确：" + str(exc)) from exc
+        normalized_config.update({key: variation[key] for key in ("persona_cards", "persona_sources", "persona_versions")})
+        normalized_config["personas"] = {role: card["identity"] for role, card in variation["persona_cards"].items()}
+        normalized_config.update(variation_seed=variation["seed"], character_ids={},
+                                 story_world="independent-" + uuid.uuid4().hex)
+        if CORPUS_PATH.is_file():
+            try:
+                reference = sample_reference(load_corpus(CORPUS_PATH), variation["seed"], count=4, max_turns=4)
+            except ValueError as exc:
+                raise HTTPException(422, "对话语料库无法读取：" + str(exc)) from exc
     defaults = default_persona_cards(roles, config.language)
     for role, entry in default_entries(roles, config.language).items():
-        if role not in config.persona_cards and role not in config.personas:
+        if variation is None and role not in config.persona_cards and role not in config.personas:
             normalized_config['persona_sources'][role] = entry['id']
             normalized_config['persona_versions'][role] = entry['version']
     normalized_config["persona_cards"] = {
@@ -600,12 +631,31 @@ async def start_simulation(config: SimulationConfig) -> dict:
                               for name in ["坐席"] + template["source"]["accounts"] +
                               [f"客户{i + 1}" for i in range(config.customer_count)]},
            "errors": [], "revision": 0, "created_at": now()}
+    if variation is not None:
+        run["creative_variation"] = variation
+        run["corpus_reference"] = reference
+        run["independence"] = {"method": "independent_generation", "parent_run": None,
+                               "initial_messages": 0, "initial_story": None,
+                               "fresh_story_world": normalized_config["story_world"]}
+        validate_fresh_input(run)
     try:
         create_run(run)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     tasks[run["id"]] = asyncio.create_task(process_run(run["id"]))
     return {"id": run["id"], "status": run["status"]}
+
+
+@app.get("/api/dialogue-corpus")
+def dialogue_corpus_status() -> dict:
+    if not CORPUS_PATH.is_file():
+        return {"available": False, "conversations": 0, "sources": []}
+    try:
+        corpus = load_corpus(CORPUS_PATH)
+    except ValueError as exc:
+        raise HTTPException(422, "对话语料库无法读取：" + str(exc)) from exc
+    return {"available": True, "conversations": len(corpus["conversations"]), "sources": corpus["sources"],
+            "structure": "原始对话轮次；不推测未提供的群聊成员和时间"}
 
 
 @app.get("/api/simulations/{session_id}")
@@ -617,7 +667,7 @@ def simulation_detail(session_id: str, view: Literal["full", "workspace"] = "ful
               "validation": validate_run(source, run) if run["status"] in {"completed", "early_end"} else []}
     if view == "workspace":
         fields = {"id", "template_id", "status", "messages", "config", "revision", "cursor", "errors",
-                  "version_record", "publication", "program_review_deferred",
+                  "version_record", "publication", "program_review_deferred", "creative_variation", "independence", "corpus_reference",
                   "pause_reason", "outcome_review", "review_progress", "agent_sessions", "public_decisions",
                   "scene_progress", "validation", "vimax_events", "story_arc", "story_arc_source",
                   "memory_status", "memory_reflections"}
@@ -692,7 +742,10 @@ async def resume(session_id: str) -> dict:
 @app.post("/api/simulations/{session_id}/retry")
 async def retry(session_id: str) -> dict:
     run = get_run(session_id)
-    config = SimulationConfig(**run["config"])
+    values = dict(run["config"])
+    if values.get("creation_mode") == "independent_random":
+        values["variation_seed"] = None
+    config = SimulationConfig(**values)
     return await start_simulation(config)
 
 
@@ -716,7 +769,8 @@ def export(session_id: str, format: str) -> Response:
                            "public_decisions": decision_ledger(run), "scene_progress": scene_ledger(run),
                            "character_bindings": run.get("character_bindings", {}),
                            "memory_reflections": run.get("memory_reflections", []), "memory_status": run.get("memory_status", {}),
-                           "review_revisions": run.get("review_revisions", []), "validation": []}, ensure_ascii=False, indent=2).encode("utf-8")
+                           "review_revisions": run.get("review_revisions", []), "creative_variation": run.get("creative_variation"),
+                           "independence": run.get("independence"), "corpus_reference": run.get("corpus_reference"), "validation": []}, ensure_ascii=False, indent=2).encode("utf-8")
         media = "application/json"
     else:
         raise HTTPException(404, "不支持此导出格式")

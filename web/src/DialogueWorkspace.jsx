@@ -53,6 +53,44 @@ function Input({ label, value, onChange, hint, ...props }) {
   return <label className="field"><span>{label}</span><input value={value} onChange={e => onChange(e.target.value)} {...props} />{hint && <small>{hint}</small>}</label>
 }
 
+export function CreationOptions({ mode, onModeChange, randomizePersonas, onRandomizeChange, corpus }) {
+  return <div className="analysis-notice">
+    <label className="field"><span>新稿创作方式</span><select value={mode} onChange={e => onModeChange(e.target.value)}>
+      <option value="independent_random">独立随机：每份重新选风格、话题和节奏</option>
+      <option value="fixed">独立新建：使用当前人物配置</option>
+    </select></label>
+    {mode === 'independent_random' && <>
+      <label><input type="checkbox" checked={randomizePersonas} onChange={e => onRandomizeChange(e.target.checked)} /> 每份重新抽选人格（关闭后使用右侧角色卡）</label>
+      <p>从母本重新创作，保留必要事实与目标。每份重新安排人物互动和广泛话题，不沿用历史台词和故事。</p>
+      <p>{corpus?.available ? `公开对话素材库：${corpus.conversations.toLocaleString()} 段可用会话` : '公开对话素材库尚未配置；当前只随机创作方案。'}</p>
+    </>}
+  </div>
+}
+
+export function MemoryOptions({ mode, storyWorld, onStoryWorldChange, memoryEnabled, onMemoryChange, onContinue, busy, personaLoading, notice }) {
+  const independent = mode === 'independent_random'
+  return <div className="memory-settings">
+    {independent && <p className="analysis-notice">本份从新人物开始，使用新的经历分组，不读取过去人物的偏好、关系或经历。即使使用当前角色卡，也不会沿用过去经历。</p>}
+    <Input label="人物经历分组" value={independent ? '' : storyWorld} onChange={onStoryWorldChange}
+      disabled={independent} maxLength="100"
+      placeholder={independent ? '每份自动新建人物经历分组' : '留空使用当前母本；也可填写同一群人物的名称'}
+      hint={independent ? '切换到使用当前人物配置后，可设置并沿用过去的人物。' : '同组人物可延续偏好与关系，不同组各自积累经历。'} />
+    <label className="memory-toggle"><input type="checkbox" disabled={independent}
+      checked={independent ? false : memoryEnabled} onChange={e => onMemoryChange(e.target.checked)} />{independent ? '沿用过去人物经历' : '沿用并积累人物经历'}</label>
+    <button className="button secondary full" type="button" disabled={independent || busy || personaLoading || !memoryEnabled}
+      onClick={onContinue}>沿用这组已保存的人物</button>
+    {!independent && notice && <p className="muted">{notice}</p>}
+  </div>
+}
+
+export function VariationNotice({ run }) {
+  if (!run.creative_variation) return null
+  return <div className="analysis-notice"><strong>独立新稿 · {run.creative_variation.style_label}</strong>
+    <p>本份重新安排人物与对话，不继承历史稿。</p>
+    {run.corpus_reference?.samples?.length > 0 && <small>本份参考 {run.corpus_reference.samples.length} 段公开短对话的表达与接话方式。</small>}
+  </div>
+}
+
 function Bubble({ message, language }) {
   const fixed = message.sender === '坐席'
   return <div className={`message ${fixed ? 'message-fixed' : ''}`}>
@@ -102,6 +140,9 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
   const [language, setLanguage] = useState('zh-CN')
   const [dialogueModel, setDialogueModel] = useState('gpt-5.5')
   const [reasoningEffort, setReasoningEffort] = useState('')
+  const [creationMode, setCreationMode] = useState('independent_random')
+  const [randomizePersonas, setRandomizePersonas] = useState(true)
+  const [corpus, setCorpus] = useState(null)
   const [personas, setPersonas] = useState({})
   const [personaCards, setPersonaCards] = useState({})
   const [personaLibrary, setPersonaLibrary] = useState([])
@@ -130,6 +171,7 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
   const [recordRetry, setRecordRetry] = useState(0)
 
   useEffect(() => { api('/api/health').then(h => { setModelReady(h.model_configured); if (!runId && !window.localStorage.getItem('vimax-dialogue-run-id')) { if (h.model) setDialogueModel(h.model); setReasoningEffort(h.reasoning_effort || '') } }).catch(() => {}) }, [])
+  useEffect(() => { api('/api/dialogue-corpus').then(setCorpus).catch(() => {}) }, [])
   useEffect(() => {
     if (startFresh && !runId) return
     let cancelled = false
@@ -145,6 +187,7 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
       setCustomerCount(previous.config.customer_count); setTarget(previous.config.target_messages)
       setPersonas(previous.config.personas || {}); setDialogueModel(previous.config.dialogue_model || 'gpt-5.5')
       setReasoningEffort(previous.config.reasoning_effort || '')
+      setCreationMode(previous.config.creation_mode || 'fixed'); setRandomizePersonas(previous.config.randomize_personas ?? false)
       setPersonaCards(previous.config.persona_cards || {})
       personaEdits.current = Object.fromEntries(Object.entries(previous.config.persona_cards || {}).map(([role, card]) => [role, Object.fromEntries(Object.keys(card || {}).map(field => [field, true]))]))
       setPersonaSource('saved'); setSelectedPersonaIds(previous.config.persona_sources || {})
@@ -235,7 +278,7 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
   }
 
   async function continueCharacters() {
-    if (!template) return
+    if (!template || creationMode === 'independent_random') return
     setBusy(true); setError(''); setMemoryNotice('')
     try {
       const result = await api(`/api/character-memory?story_world=${encodeURIComponent(storyWorld.trim() || template.id)}`)
@@ -319,6 +362,7 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
         persona_versions: Object.fromEntries(Object.entries(selectedPersonaIds).map(([role, id]) => [role, personaLibrary.find(entry => entry.id === id)?.version || 1])),
         persona_strength: personaStrength, language: language.trim(), dialogue_model: dialogueModel, reasoning_effort: reasoningEffort || null, story_notes: storyNotes,
         story_world: storyWorld.trim(), memory_enabled: memoryEnabled, character_ids: characterIds,
+        creation_mode: creationMode, randomize_personas: randomizePersonas,
       }) })
       window.localStorage.setItem('vimax-dialogue-run-id', created.id)
       onRunChanged?.(created.id)
@@ -373,12 +417,13 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
 
       {!recordLoading && !recordError && step === 2 && <div className="two-col config-layout"><Card eyebrow="03 / 模拟参数" title="安排参与者"><div className="stat-strip"><div><strong>1</strong><span>引导坐席</span></div><div><strong>{template.stats.accounts.length}</strong><span>母本账号</span></div><div><strong>{customerCount}</strong><span>参与者</span></div></div>
         <div className="input-grid"><Input label="参与者数量" type="number" min="1" max="20" value={customerCount} onChange={setCustomerCount} /><Input label="最终总消息条数" type="number" min={minimum} max="500" value={target} onChange={setTarget} /></div><Input label="对话输出语言" value={language} onChange={setLanguage} list="language-options" maxLength="35" hint="填写语言地区代码；角色发言使用该语言，母本链接和代码保持原值。" /><datalist id="language-options"><option value="zh-CN" label="简体中文" /><option value="zh-TW" label="繁體中文" /><option value="en-US" label="English (US)" /><option value="en-GB" label="English (UK)" /><option value="ja-JP" label="日本語" /><option value="ko-KR" label="한국어" /><option value="es-ES" label="Español" /><option value="fr-FR" label="Français" /><option value="de-DE" label="Deutsch" /><option value="pt-BR" label="Português" /><option value="ar-SA" label="العربية" /></datalist><label className="field"><span>对话生成模型</span><select value={dialogueModel} onChange={e => setDialogueModel(e.target.value)}><option value="gpt-6-sol">GPT-6 Sol</option><option value="gpt-5.6-luna">GPT-5.6 Luna</option><option value="gpt-5.5">GPT-5.5</option><option value="gpt-5.6-terra">GPT-5.6 Terra</option></select></label><label className="field"><span>推理强度</span><select value={reasoningEffort} onChange={e => setReasoningEffort(e.target.value)}><option value="">沿用模型设置</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label><div className="analysis-notice">当前至少需要 {minimum} 条，母本账号不限定出场，发言者按上下文选择，以坐席内容目标为准。</div>
-        <div className="memory-settings"><Input label="人物经历分组" value={storyWorld} onChange={value => { setStoryWorld(value); setCharacterIds({}); setMemoryNotice('') }} maxLength="100" placeholder="留空使用当前母本；也可填写同一群人物的名称" hint="同组人物可延续偏好与关系，不同组各自积累经历。" /><label className="memory-toggle"><input type="checkbox" checked={memoryEnabled} onChange={e => setMemoryEnabled(e.target.checked)} />沿用并积累人物经历</label><button className="button secondary full" type="button" disabled={busy || personaLoading || !memoryEnabled} onClick={continueCharacters}>沿用这组已保存的人物</button>{memoryNotice && <p className="muted">{memoryNotice}</p>}</div>
+        <CreationOptions mode={creationMode} onModeChange={setCreationMode} randomizePersonas={randomizePersonas} onRandomizeChange={setRandomizePersonas} corpus={corpus} />
+        <MemoryOptions mode={creationMode} storyWorld={storyWorld} onStoryWorldChange={value => { setStoryWorld(value); setCharacterIds({}); setMemoryNotice('') }} memoryEnabled={memoryEnabled} onMemoryChange={setMemoryEnabled} onContinue={continueCharacters} busy={busy} personaLoading={personaLoading} notice={memoryNotice} />
         <label className="field"><span>补充情节点（长篇可选，每行一件）</span><textarea rows="4" maxLength="3000" value={storyNotes} onChange={e => setStoryNotes(e.target.value)} placeholder="例如：一位晚到的成员拿不准时间安排；先试过的人分享自己为什么继续或停下。" /><small>长篇会先从母本规划事件线；这里填写的情节点优先纳入。链接、联系人和代码仍必须来自母本。</small></label><button className="button primary full" disabled={busy || personaLoading || !languageValid || Number(target) < minimum || Number(customerCount) < 1} onClick={() => start()}>开始模拟 <PlayCircle size={18} /></button></Card>
         <Card eyebrow="04 / 人格知识库" title="让每个角色说话不同"><p className="analysis-notice">先打招呼、闲聊暖场，再有人询问群用途，由坐席解释后进入正题。按人格自然接话，不要求每个人轮流报到。</p><p className="muted">{personaLoading ? '正在为每个角色设置人格…' : personaSource === 'library' ? '已从人格知识库选用；每项仍可修改。' : personaSource === 'fallback' ? '模型未及时给出有效建议，已填入可编辑的默认角色卡。' : '已设置角色卡；可从知识库换人设，或逐项修改。'}</p><button className="button secondary full" type="button" disabled={!personaLibrary.length} onClick={assignLibraryCards}>从 {personaLibrary.length} 种人格中重新分配</button><label className="field"><span>人格介入值 {Math.round(personaStrength * 100)}%</span><input type="range" min="0" max="100" step="5" value={Math.round(personaStrength * 100)} onChange={e => setPersonaStrength(Number(e.target.value) / 100)} /><small>影响角色何时接话、作什么选择及说话方式；口语习惯只偶尔出现，母本事实仍按原值校验。</small></label><div className="persona-list">{allRoles.map(role => <div className="persona-card" key={role}><strong>{role}</strong><label className="field"><span>从人格知识库选用</span><select value={selectedPersonaIds[role] || ''} onChange={e => { const entry = personaLibrary.find(item => item.id === e.target.value); if (entry) applyLibraryCard(role, entry) }}><option value="">自定义或选择人设…</option>{[['推荐 · 生活化表达', entry => entry.recommended], ['更多人物表达', entry => entry.inspiration && !entry.recommended], ['通用与自定义人格', entry => !entry.inspiration]].map(([label, matches]) => <optgroup key={label} label={label}>{personaLibrary.filter(entry => entry.kind === (role === '坐席' ? 'seat' : 'participant') && matches(entry)).map(entry => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</optgroup>)}</select>{personaLibrary.find(entry => entry.id === selectedPersonaIds[role])?.source_url && <small>借鉴表达与反应，角色仍是当前群友。<a href={personaLibrary.find(entry => entry.id === selectedPersonaIds[role]).source_url} target="_blank" rel="noreferrer">查看人格来源</a></small>}</label>{[['identity', '稳定倾向'], ['priority', '最在意的事'], ['decision_rule', '何时继续或拒绝'], ['reaction_cues', '遇到具体情境时的反应'], ['voice', '说话节奏'], ['social_style', '接话方式'], ['speech_habits', '口语习惯 / 偶尔用的短语'], ['speech_avoid', '避免重复的说法']].map(([field, label]) => <label className="field" key={field}><span>{label}</span><input maxLength={field === 'reaction_cues' ? 300 : 180} placeholder={field === 'identity' ? '描述这个人，而不是业务流程' : '可留空'} value={personaCards[role]?.[field] ?? (field === 'identity' ? personas[role] || '' : '')} onChange={e => { personaEdits.current[role] = { ...personaEdits.current[role], [field]: true }; setPersonaCards(previous => ({ ...previous, [role]: { ...previous[role], [field]: e.target.value } })) }} /></label>)}<div className="persona-save"><input maxLength="60" value={personaNames[role] || ''} onChange={e => setPersonaNames(previous => ({ ...previous, [role]: e.target.value }))} placeholder="给这张人格卡命名" /><button className="button secondary" type="button" disabled={busy} onClick={() => saveLibraryCard(role)}>{selectedPersonaIds[role]?.startsWith('custom-') ? '更新库中人格' : '保存到库'}</button>{selectedPersonaIds[role]?.startsWith('custom-') && <button className="button ghost" type="button" disabled={busy} onClick={() => deleteLibraryCard(role)}>删除所选</button>}</div></div>)}</div></Card></div>}
 
       {!recordLoading && !recordError && step === 3 && run && <div className="simulation-layout" data-run-id={run.id}><Card eyebrow="05 / 群聊排演" title="模拟对话" className="chat-card"><div className="chat-toolbar"><span className={`run-state ${run.status}`}>{runStateLabel}</span><span>{run.config?.language || language} · {run.messages?.length || 0} / {run.config?.target_messages || target} 条</span></div><div className="run-model">模型：{run.config?.dialogue_model || dialogueModel} · 推理强度：{({low: '低', medium: '中', high: '高'})[run.config?.reasoning_effort] || '模型默认'}</div>
-        {run.pause_reason && <div className="error-banner pause-banner">{run.pause_reason}</div>}
+        <VariationNotice run={run} />{run.pause_reason && <div className="error-banner pause-banner">{run.pause_reason}</div>}
         <div className="chat-scroll" ref={chatScroll}>{!run.messages?.length && <div className="chat-empty">{run.status === 'paused' ? '这份记录已暂停，尚未生成对话。' : '正在安排第一条消息…'}</div>}{(run.messages || []).map(message => <Bubble message={message} language={run.config?.language || language} key={message.seq} />)}</div>
         <RunActions run={run} scheduleLength={scheduleLength} action={action} /></Card>
         <div className="right-rail"><EventPlan run={run} />{run.story_arc?.length > 0 && <Card eyebrow="剧情规划" title="本轮事件线"><p className="muted">{['model', 'model-revised', 'model-topics', 'cached-model-topics'].includes(run.story_arc_source) ? '根据母本规划' : run.story_arc_source === 'topic-poor' ? '话题多样性不足' : run.story_arc_source === 'hybrid' ? '母本与通用事件结合' : '使用通用事件线'} · {run.story_arc.length} 个情节点。事件只在角色公开说出后才算发生。</p><details className="story-arc"><summary>查看全部情节点</summary><ol>{run.story_arc.map((beat, index) => <li key={index} className={!(run.scene_progress || []).some(item => item.id === index && item.state === "resolved") && index === run.story_arc.findIndex((beat, id) => !(run.scene_progress || []).some(item => item.id === id && item.state === "resolved") && (beat.kind !== "closure" || run.cursor >= scheduleLength - 3)) ? 'current' : ''}>{beat.event}{beat.characters?.length > 0 && <small>建议：{beat.characters.join('、')}</small>}</li>)}</ol></details></Card>}<Card eyebrow="06 / 人物会话" title="人物会话记忆"><p className="muted">逐段续写读取公开对话和各自的发言、回应与选择记录；人物按兴趣接话，也可以不发言。</p>{run.config?.memory_enabled && <p className="muted">{({ semantic: '已启用多语言语义检索', lexical: '当前使用文字检索', empty: '人物从本轮开始积累经历' })[run.memory_status?.mode] || '正在读取相关人物经历'} · 本轮想起 {run.memory_status?.recalled || 0} 条。历史动作不计入本轮进度。</p>}<div className="agent-session-list">{Object.entries(run.agent_sessions || {}).map(([name, session]) => <div className="agent-session-item" key={name}><div className="agent-session-head"><strong>{name}</strong><span>{session.turns} 次发言</span></div><details><summary>本轮记住 {session.memory_events?.length || 0} 件事</summary>{(session.memory_events || []).slice(-5).map((event, index) => <p key={`${event.seq}-${event.kind}-${index}`}>#{event.seq} {({ own_action: '自己做过', own_decision: '自己的决定', said_to: `对${event.peer}说`, heard_from: `${event.peer}对我说` })[event.kind] || '经历'}：{event.text}</p>)}</details><CharacterMemory run={run} name={name} session={session} /></div>)}</div></Card>

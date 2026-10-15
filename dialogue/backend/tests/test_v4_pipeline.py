@@ -10,7 +10,7 @@ from app.vimax_engine import decode_scenes, process, revise
 
 
 class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
-    async def run_case(self, invalid_first=False):
+    async def run_case(self, invalid_first=False, independent=False, malformed_first=False):
         roles = ['坐席', '客户1', '客户2']
         state = {'id': 'd' * 32, 'template_id': 'source', 'status': 'running', 'cursor': 0,
                  'config': {'dialogue_flow_version': 4, 'opening_policy': opening_policy(9),
@@ -25,6 +25,15 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
         template = {'analysis': {'workflow_steps': []}, 'source': {'accounts': [], 'codes': [],
                     'messages': [{'sender': '坐席', 'source_row': 1,
                                   'content': '打开 https://example.invalid/test 点赞后截图先发群里，再发给经理。'}]}}
+        if independent:
+            from app.creative_variation import create_variation_plan
+            from app.dialogue_corpus import parse_lccc, sample_reference
+            state['config']['creation_mode'] = 'independent_random'
+            state['creative_variation'] = create_variation_plan(roles, seed='fresh-pipeline')
+            corpus = parse_lccc([['你 午饭 吃 了 没', '刚刚 吃 完 呀']],
+                                {'name': 'fixture', 'url': 'https://example.invalid/corpus', 'license': 'fixture'})
+            state['corpus_reference'] = sample_reference(corpus, 'fresh-pipeline')
+            state['person_situations'] = {'客户1': {'attention': '只在听见公交换乘时开口'}}
         reviews = []
         requests = []
 
@@ -61,14 +70,14 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
                 ]
                 if invalid_first and len(requests) == 1:
                     lines[4] = '005|客户1|0|15|自然群聊|文本|-|截图已经发群里了'
-                return ['\n'.join(lines)]
+                return ['\n'.join(lines[:-1] if malformed_first and len(requests) == 1 else lines)]
 
         with tempfile.TemporaryDirectory() as directory:
             api = SimpleNamespace(get_run=get_run, save_run=save_run, get_template=lambda _: template,
                                   DATA_DIR=Path(directory),
                                   model_settings=lambda: ('https://example.invalid/v1', 'test-key', 'gpt-6-sol'),
                                   model_reasoning_effort=lambda _: 'high', review_dialogue=review)
-            with patch('app.vimax_engine.ChatOpenAI'), patch('app.vimax_engine.screenwriter_class', return_value=Writer):
+            with patch('app.vimax_engine.ChatOpenAI') as model, patch('app.vimax_engine.screenwriter_class', return_value=Writer):
                 await process(state['id'], api)
             self.assertEqual(state['status'], 'completed', state.get('errors'))
             self.assertEqual(len(state['messages']), 9)
@@ -80,6 +89,14 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
             snapshot = Path(directory) / record['path']
             self.assertIn('待补素材码：SCREENSHOT_C1_01', (snapshot / 'messages.md').read_text(encoding='utf-8'))
             self.assertEqual(record['capture_status'], 'running')
+            if independent:
+                self.assertEqual(len(requests), 2 if malformed_first else 1)
+                self.assertIn('你午饭吃了没', requests[0])
+                self.assertIn('quoted_dialogue_examples', requests[0])
+                self.assertIn('第一次完整创作', requests[0])
+                self.assertIn('只在听见公交换乘时开口', requests[0])
+                self.assertEqual(state['vimax_segments'], [{'start': 1, 'end': 9, 'strategy': 'whole_fresh_draft'}])
+                self.assertEqual(model.call_args.kwargs['max_tokens'], 32000)
             if invalid_first:
                 self.assertEqual(len(requests), 2)
                 rejected = Path(directory) / state['candidate_versions'][0]['path']
@@ -87,6 +104,12 @@ class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_image_event_survives_generation_broadcast_review_and_immutable_archive(self):
         await self.run_case()
+
+    async def test_independent_full_draft_uses_own_style_and_real_reference_then_actual_review(self):
+        await self.run_case(independent=True)
+
+    async def test_independent_malformed_first_draft_gets_one_bounded_format_repair(self):
+        await self.run_case(independent=True, malformed_first=True)
 
     async def test_rejected_complete_first_draft_is_retained_before_retry(self):
         await self.run_case(invalid_first=True)
