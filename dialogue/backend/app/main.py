@@ -829,7 +829,9 @@ async def review_dialogue(template: dict, run: dict) -> dict:
          "messages": [{"seq": m["seq"], "sender": m["sender"], "stage": m["stage"], "content": m["content"],
                        "type": m.get("type"), "image_code": m.get("image_code"), "image_mode": m.get("image_mode")}
                       for m in run["messages"]]}, temperature=0.1,
-        model_name=os.getenv("MODEL_REVIEW_NAME"), call_budget_seconds=180)
+        model_name=os.getenv("MODEL_REVIEW_NAME"),
+        call_budget_seconds=float(os.getenv('MODEL_CALL_BUDGET_SECONDS', '180'))
+        if run['config'].get('dialogue_flow_version', 1) >= 4 else 180)
     issues = result.get("issues", [])
     if not isinstance(issues, list):
         raise ValueError("整段对话复核未返回问题列表")

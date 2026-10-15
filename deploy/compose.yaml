@@ -11,8 +11,8 @@ services:
       MODEL_ANALYSIS_NAME: gpt-6-sol
       MODEL_REVIEW_NAME: gpt-6-sol
       MODEL_API_BASE_URL: https://yuangeluyou.com/v1
-      MODEL_TIMEOUT_SECONDS: "180"
-      MODEL_CALL_BUDGET_SECONDS: "240"
+      MODEL_TIMEOUT_SECONDS: "300"
+      MODEL_CALL_BUDGET_SECONDS: "360"
     volumes:
       - ${VIMAX_SHARED_DIR:-../.vimax/server}/state:/app/.vimax
       - ${VIMAX_SHARED_DIR:-../.vimax/server}/configs:/app/configs
