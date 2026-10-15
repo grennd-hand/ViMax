@@ -112,9 +112,12 @@ export function MemoryOptions({ mode, storyWorld, onStoryWorldChange, memoryEnab
 }
 
 export function VariationNotice({ run }) {
-  if (!run.creative_variation) return null
-  return <div className="analysis-notice"><strong>独立新稿 · {run.creative_variation.style_label}</strong>
-    <p>本份重新安排人物与对话，不继承历史稿。</p>
+  const rehearsal = run.config?.usage_context === 'fictional_rehearsal'
+  if (!run.creative_variation && !rehearsal) return null
+  return <div className="analysis-notice">
+    {rehearsal && <><strong>虚构排练稿</strong><p>人物和行为均为模拟，不能代表真实参与记录。</p></>}
+    {run.creative_variation && <><strong>独立新稿 · {run.creative_variation.style_label}</strong>
+      <p>本份重新安排人物与对话，不继承历史稿。</p></>}
     {run.corpus_reference?.samples?.length > 0 && <small>本份参考 {run.corpus_reference.samples.length} 段公开短对话的表达与接话方式。</small>}
   </div>
 }

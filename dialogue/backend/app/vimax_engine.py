@@ -122,6 +122,7 @@ def writing_contract(template: dict, run: dict) -> str:
                "cast": list(run['agent_sessions']),
                "roles": run["config"]["persona_cards"] if run['config'].get('persona_strength', 0.85) > 0 else {},
                "persona_strength": run['config'].get('persona_strength', 0.85),
+               "usage_context": run['config'].get('usage_context'),
                "language": language_context(run["config"].get("language")),
                "past_experience_by_owner": {role:state.get("long_term_memory",[]) for role,state in run["agent_sessions"].items()},
                "additional_plot": run["config"].get("story_notes", "")}

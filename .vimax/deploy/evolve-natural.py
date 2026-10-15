@@ -296,7 +296,8 @@ def capture_artifacts(api, out, run, export_xlsx):
             atomic(path, payload)
     if len(run.get('messages', [])) == TARGET:
         atomic(out / '群聊150条.xlsx', export_xlsx(run))
-        lines = []
+        lines = (['# 虚构示例／内部排练稿', '人物及其行为均为虚构情节，不代表真实参与记录。']
+                 if run.get('config', {}).get('usage_context') == 'fictional_rehearsal' else [])
         for message in run['messages']:
             lines.append(f"{message['seq']:03d} **{message['sender']}**：{message['content']}")
             if message.get('image_code'):

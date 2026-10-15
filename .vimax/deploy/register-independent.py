@@ -224,6 +224,24 @@ def validate_registry(entries):
         run_ids.add(entry.get('run_id'))
 
 
+def evidence_inventory(folder):
+    """Freeze all existing safe evidence, including reports added after capture.
+
+    Only top-level registration derivatives, immutable registration events and
+    the isolated runtime are excluded. Capture-time hashes are not an inventory
+    of files that may have been added between capture and registration.
+    """
+    excluded = {'hashes.json', 'review-index.json', 'registration.json'}
+    result = {}
+    for path in folder.rglob('*'):
+        relative = path.relative_to(folder)
+        if (not path.is_file() or '.runtime' in relative.parts or relative.parts[0] == 'registrations'
+                or relative.as_posix() in excluded):
+            continue
+        result[relative.as_posix()] = digest(safe_file(folder, relative.as_posix()))
+    return result
+
+
 def register(index, attempt_label=None, verdict='unreviewed', summary='', reassess=False, root=None):
     root = Path(root or OUT).resolve()
     label = label_for(index, attempt_label)
@@ -250,9 +268,16 @@ def register(index, attempt_label=None, verdict='unreviewed', summary='', reasse
                            'program_review_deferred': bool(run.get('program_review_deferred')), 'reports': reports,
                            'dual_full_read': True, 'review_evidence_sha256': digest(folder / 'reviews/review-evidence.json')}
             human_index.update(reviewer_kind='agent', user_approval='unset')
-        excluded = {'hashes.json', 'review-index.json', 'registration.json'}
-        evidence_files = {name: value for name, value in original_hashes.items()
-                          if name not in excluded and not name.startswith('registrations/')}
+        inventory = evidence_inventory(folder)
+        if previous and not reassess:
+            # Old registrations may omit a report that the final hashes.json
+            # already bound. Validate that legacy manifest-bound file above,
+            # but never rewrite its old event by expanding the frozen set.
+            unexpected = set(inventory) - set(previous['evidence_files']) - set(original_hashes)
+            require(not unexpected, '发现新增未冻结证据；必须显式reassess追加登记：' + ','.join(sorted(unexpected)))
+            evidence_files = copy.deepcopy(previous['evidence_files'])
+        else:
+            evidence_files = inventory
         if evidence is not None:
             for relative in ['reviews/review-evidence.json'] + [path.split('/', 1)[1] for path in reports]:
                 evidence_files[relative] = digest(safe_file(folder, relative))

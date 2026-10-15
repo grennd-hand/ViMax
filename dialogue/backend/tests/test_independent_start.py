@@ -45,6 +45,7 @@ class IndependentStartTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runs[0]['creative_variation'], runs[1]['creative_variation'])
         for run in runs:
             self.assertEqual(run['messages'], [])
+            self.assertEqual(run['config']['usage_context'], 'fictional_rehearsal')
             self.assertEqual(run['config']['character_ids'], {})
             self.assertNotIn('vimax_story', run)
             self.assertNotIn('person_situations', run)

@@ -276,6 +276,10 @@ def export_xlsx(run: dict[str, Any]) -> bytes:
     book = Workbook()
     sheet = book.active
     sheet.title = "生成剧本"
+    if run.get('config', {}).get('usage_context') == 'fictional_rehearsal':
+        sheet.title = "虚构排练剧本"
+        book.properties.title = "虚构示例／内部排练稿"
+        book.properties.subject = "虚构人物与模拟行为，不代表真实参与记录"
     sheet.append(HEADERS)
     for m in run["messages"]:
         sheet.append([m["seq"], m["sender"], m.get("reply_to"), m["type"], m.get("delay"), m.get("content"),

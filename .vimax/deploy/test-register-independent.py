@@ -217,6 +217,59 @@ class IndependentRegistrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '冻结'):
             driver.register(1, verdict='candidate', summary='离线明确新评估', root=self.root)
 
+    def test_initial_report_added_after_capture_is_frozen_and_identical_replay_is_read_only(self):
+        folder, run = self.fixture()
+        self.reports(folder, run)
+        initial = folder / 'reviews/R000-initial-primary.md'
+        driver.base.atomic(initial, b'offline initial review created after generation capture')
+        self.assertNotIn('reviews/R000-initial-primary.md', driver.read_json(folder / 'hashes.json'))
+        entry = driver.register(1, verdict='alternative', summary='late report fixture', root=self.root)
+        self.assertEqual(entry['evidence_files']['reviews/R000-initial-primary.md'], driver.digest(initial))
+        before = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                  for path in self.root.rglob('*') if path.is_file()}
+        self.assertEqual(driver.register(1, verdict='alternative', summary='late report fixture', root=self.root), entry)
+        after = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                 for path in self.root.rglob('*') if path.is_file()}
+        self.assertEqual(after, before)
+        original_bytes = initial.read_bytes()
+        for action in ('change', 'delete'):
+            with self.subTest(action=action):
+                if action == 'change':
+                    driver.base.atomic(initial, original_bytes + b' altered')
+                else:
+                    initial.unlink()
+                self.rehash(folder)
+                with self.assertRaises(ValueError):
+                    driver.register(1, verdict='alternative', summary='late report fixture', root=self.root)
+                driver.base.atomic(initial, original_bytes)
+
+    def test_legacy_manifest_bound_extra_report_does_not_expand_or_rewrite_registered_event(self):
+        folder, run = self.fixture()
+        self.reports(folder, run)
+        entry = driver.register(1, verdict='alternative', summary='legacy V01-shaped fixture', root=self.root)
+        # Reproduce the old bug's on-disk shape: its original entry omitted this
+        # already existing report, while final capture hashes bound its bytes.
+        initial = folder / 'reviews/R000-initial-primary.md'
+        driver.base.atomic(initial, b'offline legacy initial review')
+        self.rehash(folder)
+        before = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                  for path in self.root.rglob('*') if path.is_file()}
+        self.assertEqual(driver.register(1, verdict='alternative', summary='legacy V01-shaped fixture', root=self.root), entry)
+        self.assertNotIn('reviews/R000-initial-primary.md', entry['evidence_files'])
+        after = {path.relative_to(self.root).as_posix(): path.read_bytes()
+                 for path in self.root.rglob('*') if path.is_file()}
+        self.assertEqual(after, before)
+        driver.base.atomic(initial, b'changed legacy review')
+        with self.assertRaisesRegex(ValueError, 'SHA'):
+            driver.register(1, verdict='alternative', summary='legacy V01-shaped fixture', root=self.root)
+
+    def test_replay_rejects_unregistered_unhashed_additions_without_explicit_reassessment(self):
+        folder, run = self.fixture()
+        driver.register(1, summary='unreviewed frozen fixture', root=self.root)
+        driver.base.atomic(folder / 'reviews/new-extra.md', b'unregistered new evidence')
+        with self.assertRaisesRegex(ValueError, '新增未冻结'):
+            driver.register(1, summary='unreviewed frozen fixture', root=self.root)
+
 
 if __name__ == '__main__':
     unittest.main()

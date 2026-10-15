@@ -25,6 +25,20 @@ it('shows the new run actual style and sample count without relabeling old histo
   const html = renderToStaticMarkup(<VariationNotice run={{creative_variation: {style_label: '碎句接话 · 温和分歧'}, corpus_reference: {samples: [{}, {}, {}]}}} />)
   expect(html).toContain('碎句接话 · 温和分歧')
   expect(html).toContain('3 段公开短对话')
+  expect(html).not.toContain('虚构排练稿')
+})
+
+it('labels only explicitly configured rehearsal runs without adding confirmation steps', () => {
+  for (const creative_variation of [undefined, {style_label: '碎句接话'}]) {
+    const run = {config: {usage_context: 'fictional_rehearsal'}, creative_variation}
+    const html = renderToStaticMarkup(<VariationNotice run={run} />)
+    expect(html).toContain('虚构排练稿')
+    expect(html).toContain('人物和行为均为模拟，不能代表真实参与记录')
+    expect(html).not.toMatch(/<(?:input|button|form)\b/)
+    expect(run.config.usage_context).toBe('fictional_rehearsal')
+  }
+  expect(renderToStaticMarkup(<VariationNotice run={paused} />)).toBe('')
+  expect(renderToStaticMarkup(<VariationNotice run={{config: {usage_context: 'other'}}} />)).toBe('')
 })
 
 describe('creation memory options', () => {

@@ -143,7 +143,9 @@ def save_run(run: dict) -> None:
             folder = index.working_dir(run["vimax_project_id"]) / "dialogue"
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "messages.json").write_text(json.dumps(run["messages"], ensure_ascii=False, indent=2), encoding="utf-8")
-            (folder / "messages.md").write_text("\n\n".join(f"{m['seq']} **{m['sender']}**：{m['content']}" for m in run["messages"]), encoding="utf-8")
+            prefix = ("# 虚构示例／内部排练稿\n\n人物及行为为虚构情节，不代表真实参与记录。\n\n"
+                      if run['config'].get('usage_context') == 'fictional_rehearsal' else '')
+            (folder / "messages.md").write_text(prefix + "\n\n".join(f"{m['seq']} **{m['sender']}**：{m['content']}" for m in run["messages"]), encoding="utf-8")
             (folder / "messages.xlsx").write_bytes(export_xlsx(run))
 
 
@@ -408,6 +410,7 @@ class SimulationConfig(BaseModel):
     creation_mode: Literal["independent_random", "fixed"] = "independent_random"
     variation_seed: str | None = Field(default=None, max_length=80)
     randomize_personas: bool = True
+    usage_context: Literal["fictional_rehearsal"] = "fictional_rehearsal"
 
     @field_validator("language")
     @classmethod
