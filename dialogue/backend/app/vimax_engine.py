@@ -387,6 +387,16 @@ async def revise(writer_type, chat, api, session_id, template, run, issues, reas
     original = {m["seq"]:m for m in messages}
     request = writing_contract(template, run) + f"\n这是已有{run['config']['target_messages']}条草稿的编辑，保持完整总条数和事件顺序。\n"
     request += "问题：" + json.dumps(issues,ensure_ascii=False) + "\n审阅说明："+reason
+    if run['config'].get('dialogue_flow_version', 1) >= 3:
+        context = rolling_context(run, messages)
+        request += '\n修订时保留分角色私有动机与接话约束：' + json.dumps({
+            'private_by_owner': {role: {'personal_now': state['personal_now']}
+                                 for role, state in context['private_by_owner'].items()},
+            'threads': context['threads'], 'turn_selection': context['turn_selection'],
+        }, ensure_ascii=False)
+        request += ('这些人物处境、动机和关系设定不是已公开事实，只约束所属人物自己的选择；'
+                    '其他人只能依据修订后该条之前已经公开的台词回应，不能读取他人私有动机，'
+                    '也不能把原稿后段才出现的消息提前当作已知。')
     request += "\n原对话："+json.dumps([{k:m[k] for k in ['seq','sender','reply_to','delay','stage','content']} for m in messages],ensure_ascii=False)
     request += ('\n本次明确使用六项新版格式。' if run['config'].get('dialogue_flow_version', 1) >= 2 else '\n本次明确使用四项旧版格式。')
     request += "\n在script数组内返回完整修订稿，新版格式NNN|人物|回复编号或0|间隔秒|交流阶段|台词，旧版仍用四项。允许调整问题段的发言人和接话关系；其他有效内容尽量保留。可以补入母本原值，但不能添加未知原值或改变业务含义。连续重复的问题要重写整段，不能只换近义词。"
