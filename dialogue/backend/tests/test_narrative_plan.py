@@ -1,6 +1,7 @@
 import json
 import unittest
 from app.narrative_plan import DialogueEvent, OrganicPlan, module, parse_plan, planning_requirement
+from app.model_stream import ModelRefusalError
 
 
 class NovelEventPlanTests(unittest.TestCase):
@@ -114,3 +115,51 @@ class NovelEventPlanTests(unittest.TestCase):
         self.assertEqual(planning_requirement(self.run), fixed_before)
         self.assertEqual(OrganicPlan.model_json_schema(), schema_before)
         self.assertIn('提出新话题的人须有当时的实际疑问', fixed_before)
+
+    def test_independent_complete_object_with_actual_v09_shaped_chinese_preamble_is_local_only(self):
+        data = self.organic_plan()
+        self.run['config']['creation_mode'] = 'independent_random'
+        prefix = ('我会按要求只返回规划 JSON：把前几条安排成招呼、暖场和群用途探问，再让坐席公开完整入口与步骤；'
+                  '后续保留日常岔话、不同参与意愿，以及“点赞—截图—发群—联系提交”的实际因果。'
+                  '业务奖励和付款只作为母本说法，不写成已验证结果。')
+        before = json.loads(json.dumps(data, ensure_ascii=False))
+        events = parse_plan(prefix + json.dumps(data, ensure_ascii=False), self.run)
+        self.assertEqual(events, data['events'])
+        self.assertEqual(self.run['conversation_threads'], data['threads'])
+        self.assertEqual(self.run['person_situations']['客户1']['wants'], data['people'][1]['wants'])
+        self.assertEqual(data, before)
+
+    def test_prefixed_independent_object_still_requires_schema_roles_and_continuity(self):
+        data = self.organic_plan()
+        self.run['config']['creation_mode'] = 'independent_random'
+        for change in ('missing_field', 'unknown_role', 'bad_index'):
+            value = json.loads(json.dumps(data, ensure_ascii=False))
+            if change == 'missing_field': del value['events'][0]['stop_when']
+            if change == 'unknown_role': value['events'][0]['roles'] = ['未知人']
+            if change == 'bad_index': value['events'][0]['index'] = 1
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                parse_plan('以下是规划：' + json.dumps(value, ensure_ascii=False), self.run)
+
+    def test_independent_prefix_does_not_recover_truncation_multiple_objects_or_refusal(self):
+        data = self.organic_plan()
+        self.run['config']['creation_mode'] = 'independent_random'
+        raw = json.dumps(data, ensure_ascii=False)
+        for text in ('以下是规划：' + raw[:-1], '以下是规划：' + raw + '{}',
+                     '以下是规划：' + raw + '再说一点', '以下是规划：没有JSON',
+                     '说明里提到{}，真正规划是' + raw):
+            with self.subTest(text=text[:30]), self.assertRaises(ValueError):
+                parse_plan(text, self.run)
+        for refusal in ('无法协助编写这类推广内容。', "I'm sorry, but I cannot assist with that request."):
+            with self.subTest(refusal=refusal), self.assertRaises(ModelRefusalError):
+                parse_plan(refusal + raw, self.run)
+
+    def test_fixed_mode_keeps_rejecting_nonjson_preamble_and_legacy_contract_stays_intact(self):
+        organic = self.organic_plan()
+        self.run['config']['creation_mode'] = 'fixed'
+        with self.assertRaisesRegex(ValueError, '格式不完整'):
+            parse_plan('以下是规划：' + json.dumps(organic, ensure_ascii=False), self.run)
+        self.run['config']['dialogue_flow_version'] = 1
+        raw = json.dumps({'events': self.events}, ensure_ascii=False)
+        self.assertEqual(parse_plan(raw, self.run), self.events)
+        with self.assertRaisesRegex(ValueError, '格式不完整'):
+            parse_plan('以下是规划：' + raw, self.run)

@@ -9,6 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 from .opening import opening_requirement
+from .model_stream import ModelRefusalError, plain_text_refusal
 
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('vimax_novel_event', ROOT / 'interfaces' / 'event.py')
@@ -188,11 +189,33 @@ def parse_plan(text: str, run: dict) -> list[dict]:
     if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
     from utils.robust_json_parser import TrailingCommaTolerantPydanticOutputParser
     organic = run['config'].get('dialogue_flow_version', 1) >= 3
+    independent = organic and run['config'].get('creation_mode') == 'independent_random'
+    if independent and plain_text_refusal(text):
+        # The raw response is already retained by RecordedChat. Do not bypass a
+        # refusal by extracting a later object, or echo private response text.
+        raise ModelRefusalError('refusal', '规划响应明确拒绝，未尝试提取后续JSON')
+    incomplete = ('事件规划格式不完整，需要包含人物动机、话题触发与停止条件' if organic else
+                  '事件规划格式不完整，需要包含起因、过程、结果和消息区间')
     try:
         plan = TrailingCommaTolerantPydanticOutputParser(pydantic_object=OrganicPlan if organic else DialoguePlan).parse(text)
     except Exception as exc:
-        raise ValueError('事件规划格式不完整，需要包含人物动机、话题触发与停止条件' if organic else
-                         '事件规划格式不完整，需要包含起因、过程、结果和消息区间') from exc
+        start = text.find('{') if isinstance(text, str) else -1
+        if not independent or start < 1 or not text[:start].strip():
+            raise ValueError(incomplete) from exc
+        try:
+            # Only discard a non-JSON preamble before one complete object. The
+            # standard decoder must consume the whole remainder: no partial
+            # JSON repair, invented field values, multiple objects or trailing
+            # prose. Existing schema-defined optional defaults stay unchanged.
+            value, end = json.JSONDecoder().raw_decode(text, start)
+            if not isinstance(value, dict) or text[end:].strip():
+                raise ValueError('顶层JSON对象之后仍有其他内容')
+        except (ValueError, TypeError) as extraction_error:
+            raise ValueError('独立事件规划不是唯一完整JSON对象；未补写缺失字段或截断内容') from extraction_error
+        try:
+            plan = OrganicPlan.model_validate(value)
+        except Exception as validation_error:
+            raise ValueError(incomplete) from validation_error
     expected = 1
     roles = set(run['agent_sessions'])
     for index, event in enumerate(plan.events):
