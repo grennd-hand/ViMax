@@ -11,6 +11,14 @@ from app.vimax_engine import ModelRefusalError, RecordedChat, decode_scenes, pro
 
 
 class V4PipelineTests(unittest.IsolatedAsyncioTestCase):
+    def test_same_meaning_stage_label_from_actual_model_response_is_normalized(self):
+        run = {'config': {'target_messages': 1, 'dialogue_flow_version': 4}, 'agent_sessions': {'客户1': {}}}
+        message = decode_scenes(['022|客户1|017|11|进入正题|文本|-|推广商品这四个字还是太宽了。'], run, 22, 1)[0]
+        self.assertEqual(message['stage'], '自然群聊')
+        self.assertEqual(message['reply_to'], 17)
+        with self.assertRaises(ValueError):
+            decode_scenes(['022|客户1|017|11|未知阶段|文本|-|同样一句话'], run, 22, 1)
+
     def test_refusal_without_dialogue_is_not_a_repairable_line_count_error(self):
         run = {'config': {'target_messages': 150}, 'agent_sessions': {'坐席': {}}}
         with self.assertRaises(ModelRefusalError):

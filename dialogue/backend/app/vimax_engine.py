@@ -79,6 +79,9 @@ def decode_scenes(scenes: list[str], run: dict, start: int = 1, expected_count: 
                     number, speaker, reply, delay, stage, kind, image_code, text = parts
                 else:
                     number, speaker, reply, delay, stage, text = parts
+                delay, stage = delay.strip(), stage.strip()
+                stage = {'寒暄': '寒暄暖场', '暖场': '寒暄暖场', '了解用途': '了解群用途',
+                         '用途说明': '了解群用途', '进入正题': '自然群聊', '闲聊': '自然群聊'}.get(stage, stage)
                 if not delay.isdigit() or not 0 <= int(delay) <= 600 or stage not in STAGES:
                     raise ValueError('消息间隔需为0至600秒，交流阶段需为寒暄暖场、了解群用途或自然群聊')
             else:
