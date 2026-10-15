@@ -1,0 +1,15 @@
+# Outer HTTPS proxy site fragments. Merge into the existing shared Caddyfile;
+# do not replace other applications' sites or global options with this file.
+https://vimax.217.194.133.194.sslip.io {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+    reverse_proxy 172.18.0.1:18080
+}
+
+https://script-variant-studio.217.194.133.194.sslip.io {
+    redir https://vimax.217.194.133.194.sslip.io{uri} 308
+}

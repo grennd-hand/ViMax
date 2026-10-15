@@ -1,0 +1,12 @@
+FROM python:3.12-slim-bookworm
+WORKDIR /app
+COPY dialogue/backend/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+COPY dialogue/backend /app/dialogue/backend
+COPY agents /app/agents
+COPY interfaces /app/interfaces
+COPY utils /app/utils
+COPY agent_runtime /app/agent_runtime
+ENV PYTHONUNBUFFERED=1 PYTHONUTF8=1 PYTHONPATH=/app:/app/dialogue/backend
+EXPOSE 9014
+CMD ["python", "-m", "uvicorn", "app.main:app", "--app-dir", "dialogue/backend", "--host", "0.0.0.0", "--port", "9014"]

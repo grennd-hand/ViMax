@@ -1,0 +1,12 @@
+:8080 {
+    request_body {
+        max_size 100MB
+    }
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+    }
+    reverse_proxy workbench:4173 {
+        flush_interval -1
+    }
+}

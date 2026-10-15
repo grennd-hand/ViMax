@@ -1,0 +1,50 @@
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    image: vimax-dialogue-backend:${VIMAX_RELEASE:-local}
+    restart: unless-stopped
+    environment:
+      MODEL_NAME: gpt-6-sol
+      MODEL_DIALOGUE_NAME: gpt-6-sol
+      MODEL_ANALYSIS_NAME: gpt-6-sol
+      MODEL_REVIEW_NAME: gpt-6-sol
+      MODEL_API_BASE_URL: https://yuangeluyou.com/v1
+      MODEL_TIMEOUT_SECONDS: "300"
+      MODEL_CALL_BUDGET_SECONDS: "360"
+    volumes:
+      - ${VIMAX_SHARED_DIR:-../.vimax/server}/state:/app/.vimax
+      - ${VIMAX_SHARED_DIR:-../.vimax/server}/configs:/app/configs
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9014/api/health', timeout=5)"]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+  workbench:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    image: vimax-dialogue-web:${VIMAX_RELEASE:-local}
+    restart: unless-stopped
+    env_file:
+      - ${VIMAX_SHARED_DIR:-../.vimax/server}/access.env
+    environment:
+      VIMAX_DIALOGUE_URL: http://backend:9014
+      VIMAX_AUTH_REQUIRED: "1"
+      VIMAX_AUTH_SECURE_COOKIE: "1"
+    volumes:
+      - ${VIMAX_SHARED_DIR:-../.vimax/server}/state:/app/.vimax
+      - ${VIMAX_SHARED_DIR:-../.vimax/server}/configs:/app/configs
+    depends_on:
+      backend:
+        condition: service_healthy
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - ${VIMAX_BIND_ADDR:-127.0.0.1}:${VIMAX_PUBLIC_PORT:-18081}:8080
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - workbench
