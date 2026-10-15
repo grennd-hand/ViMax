@@ -25,12 +25,31 @@ async function api(path, options = {}) {
 
 const steps = ['导入母本', '确认目标', '设置角色', '模拟对话']
 
-export function archiveLabel(run) {
+function isIndependentRun(run) {
   const publication = run?.publication || {}
-  const independent = publication.method === 'independent_generation'
+  return publication.method === 'independent_generation'
     || publication.series?.startsWith('独立随机-')
     || run?.version_record?.method === 'independent_generation'
     || run?.independence?.method === 'independent_generation'
+    || run?.config?.creation_mode === 'independent_random'
+}
+
+export function finalReviewIncomplete(run) {
+  if (run?.status !== 'failed' || !isIndependentRun(run)) return false
+  if (run.publication?.program_review_state) return run.publication.program_review_state !== 'reviewed'
+  if (run.review_progress?.phase === 'done') return false
+  const history = run.program_review_history || []
+  return history.at(-1)?.state !== 'returned'
+}
+
+export function goalMetForDisplay(run) {
+  if (finalReviewIncomplete(run)) return false
+  return run?.publication?.read_only ? run?.outcome_review?.met === true : run?.outcome_review?.met !== false
+}
+
+export function archiveLabel(run) {
+  const publication = run?.publication || {}
+  const independent = isIndependentRun(run)
   const human = publication.review_label || (independent ? '待完整审阅'
     : ({ candidate: '人工候选', alternative: '表达备选', needs_revision: '人工需修订' })[publication.human_verdict] || '历史版本')
   const program = ({ deferred: '模型全文复核未执行', reviewed: '模型已全文复核', not_completed: '模型审阅未完成' })[publication.program_review_state] || '模型审阅状态未记录'
@@ -38,7 +57,10 @@ export function archiveLabel(run) {
 }
 
 export function ArchiveReviewNotice({ run }) {
-  return <>{run.publication.display_note && <p className="analysis-notice">{run.publication.display_note}{run.publication.representative_version && <span> 本编号正式内容代表：{run.publication.representative_version}。</span>}</p>}<p className="muted">{run.publication.human_summary}</p>{run.outcome_review?.met === undefined && <p className="muted">目标达成情况尚无完整模型复核结论。</p>}</>
+  const publication = run.publication || {}
+  const incomplete = finalReviewIncomplete(run)
+  const hasEarlierConclusions = run.outcome_review || run.quality_review?.length > 0
+  return <>{publication.display_note && <p className="analysis-notice">{publication.display_note}{publication.representative_version && <span> 本编号正式内容代表：{publication.representative_version}。</span>}</p>}{publication.human_summary && <p className="muted">{publication.human_summary}</p>}{incomplete ? <p className="validation-error">终稿模型复核未完成{hasEarlierConclusions ? '；此前目标/问题结论来自较早稿。' : '，目标达成情况尚无终稿结论。'}</p> : run.outcome_review?.met === undefined && <p className="muted">目标达成情况尚无完整模型复核结论。</p>}</>
 }
 
 export function RunActions({ run, scheduleLength, action }) {
@@ -392,7 +414,8 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
   const valid = finished && run.status !== 'failed' && !((run.validation || []).length || (run.errors || []).length)
   const archived = run?.publication?.read_only === true
   const archivedLabel = archiveLabel(run)
-  const goalMet = archived ? run?.outcome_review?.met === true : run?.outcome_review?.met !== false
+  const finalReviewPending = finalReviewIncomplete(run)
+  const goalMet = goalMetForDisplay(run)
   const reviewing = run?.status === 'running' && Boolean(run.review_progress?.phase)
   const runStateLabel = archived ? archivedLabel : reviewing
     ? ({ planning: '正在规划群聊事件', writing: `正在续写对话 ${run?.review_progress?.drafted || 0} / ${run?.config?.target_messages || target} 条`, validate: '正在检查原值与条数', broadcast: '正在保存角色经历', review: '正在检查对话', repair: '正在修订问题', verify: '正在复查修订' })[run.review_progress?.phase] || '正在检查对话'
@@ -433,7 +456,7 @@ export default function DialogueWorkspace({ runId, startFresh = false, selection
         <div className="chat-scroll" ref={chatScroll}>{!run.messages?.length && <div className="chat-empty">{run.status === 'paused' ? '这份记录已暂停，尚未生成对话。' : '正在安排第一条消息…'}</div>}{(run.messages || []).map(message => <Bubble message={message} language={run.config?.language || language} key={message.seq} />)}</div>
         <RunActions run={run} scheduleLength={scheduleLength} action={action} /></Card>
         <div className="right-rail"><EventPlan run={run} />{run.story_arc?.length > 0 && <Card eyebrow="剧情规划" title="本轮事件线"><p className="muted">{['model', 'model-revised', 'model-topics', 'cached-model-topics'].includes(run.story_arc_source) ? '根据母本规划' : run.story_arc_source === 'topic-poor' ? '话题多样性不足' : run.story_arc_source === 'hybrid' ? '母本与通用事件结合' : '使用通用事件线'} · {run.story_arc.length} 个情节点。事件只在角色公开说出后才算发生。</p><details className="story-arc"><summary>查看全部情节点</summary><ol>{run.story_arc.map((beat, index) => <li key={index} className={!(run.scene_progress || []).some(item => item.id === index && item.state === "resolved") && index === run.story_arc.findIndex((beat, id) => !(run.scene_progress || []).some(item => item.id === id && item.state === "resolved") && (beat.kind !== "closure" || run.cursor >= scheduleLength - 3)) ? 'current' : ''}>{beat.event}{beat.characters?.length > 0 && <small>建议：{beat.characters.join('、')}</small>}</li>)}</ol></details></Card>}<Card eyebrow="06 / 人物会话" title="人物会话记忆"><p className="muted">逐段续写读取公开对话和各自的发言、回应与选择记录；人物按兴趣接话，也可以不发言。</p>{run.config?.memory_enabled && <p className="muted">{({ semantic: '已启用多语言语义检索', lexical: '当前使用文字检索', empty: '人物从本轮开始积累经历' })[run.memory_status?.mode] || '正在读取相关人物经历'} · 本轮想起 {run.memory_status?.recalled || 0} 条。历史动作不计入本轮进度。</p>}<div className="agent-session-list">{Object.entries(run.agent_sessions || {}).map(([name, session]) => <div className="agent-session-item" key={name}><div className="agent-session-head"><strong>{name}</strong><span>{session.turns} 次发言</span></div><details><summary>本轮记住 {session.memory_events?.length || 0} 件事</summary>{(session.memory_events || []).slice(-5).map((event, index) => <p key={`${event.seq}-${event.kind}-${index}`}>#{event.seq} {({ own_action: '自己做过', own_decision: '自己的决定', said_to: `对${event.peer}说`, heard_from: `${event.peer}对我说` })[event.kind] || '经历'}：{event.text}</p>)}</details><CharacterMemory run={run} name={name} session={session} /></div>)}</div></Card>
-          <Card eyebrow="07 / 检查与导出" title="生成结果"><div className={`result-banner ${valid && goalMet ? 'good' : ''}`}>{archived ? archivedLabel : run.status === 'completed' ? '成功路径已完成' : run.status === 'early_end' ? goalMet ? '客户提前结束分支' : '本轮目标未达成' : run.status === 'failed' ? '生成未通过' : '模拟进行中'}</div>{archived && <ArchiveReviewNotice run={run} />}{!goalMet && run.outcome_review?.reason && <p className="validation-error">{run.outcome_review.reason}</p>}{[...(run.validation || []), ...(run.errors || [])].map((item, i) => <p className="validation-error" key={i}>{item}</p>)}<div className="download-row"><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/xlsx` : undefined}><ArrowDown size={17} />下载 Excel</a><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/json` : undefined}><ArrowDown size={17} />下载 JSON</a></div></Card></div></div>}
+          <Card eyebrow="07 / 检查与导出" title="生成结果"><div className={`result-banner ${valid && goalMet ? 'good' : ''}`}>{archived ? archivedLabel : run.status === 'completed' ? '成功路径已完成' : run.status === 'early_end' ? goalMet ? '客户提前结束分支' : '本轮目标未达成' : run.status === 'failed' ? '生成未通过' : '模拟进行中'}</div>{(archived || finalReviewPending) && <ArchiveReviewNotice run={run} />}{!finalReviewPending && !goalMet && run.outcome_review?.reason && <p className="validation-error">{run.outcome_review.reason}</p>}{[...(run.validation || []), ...(run.errors || [])].map((item, i) => <p className="validation-error" key={i}>{item}</p>)}<div className="download-row"><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/xlsx` : undefined}><ArrowDown size={17} />下载 Excel</a><a className={`button secondary ${valid ? '' : 'disabled'}`} href={valid ? `/dialogue-api/simulations/${run.id}/export/json` : undefined}><ArrowDown size={17} />下载 JSON</a></div></Card></div></div>}
     </main>
   </div>
 }
